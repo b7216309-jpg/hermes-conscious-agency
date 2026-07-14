@@ -459,9 +459,7 @@ class AgencyEngine:
             for item in questions[:5]:
                 lines.append(f"- [{item.get('id')}] {item.get('question')}")
         signal_label = (
-            "Control signals"
-            if unrestricted_cron
-            else "Control signals (software priorities)"
+            "Control signals" if unrestricted_cron else "Control signals (software priorities)"
         )
         lines.append(f"{signal_label}: {snapshot['control_signals']}")
         footer_lines: list[str] = []

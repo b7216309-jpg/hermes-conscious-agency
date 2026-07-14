@@ -122,8 +122,7 @@ class AgencyRuntime:
                 if (
                     not self.config.educational_disable_cycle_limits
                     and action == "add_reflection"
-                    and int(cycle.get("reflections", 0))
-                    >= self.config.maximum_reflections_per_tick
+                    and int(cycle.get("reflections", 0)) >= self.config.maximum_reflections_per_tick
                 ):
                     return json.dumps(
                         {"success": False, "error": "reflection limit reached for this tick"}

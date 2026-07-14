@@ -70,9 +70,10 @@ def test_educational_override_bypasses_plugin_speech_gates_but_respects_pause(co
     assert tick["blocked_by"] == []
     assert tick["policy"]["educational_bypass_proactive_gates"] is True
     message = "x" * (config.maximum_message_chars + 10)
-    assert engine.record_decision("speak", "Educational test", message=message)[
-        "delivery_text"
-    ] == message
+    assert (
+        engine.record_decision("speak", "Educational test", message=message)["delivery_text"]
+        == message
+    )
 
     engine.pause("operator stop")
     paused = engine.evaluate_tick(datetime(2026, 7, 14, 23, tzinfo=UTC))
