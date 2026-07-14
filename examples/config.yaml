@@ -1,0 +1,29 @@
+# Merge this section into ~/.hermes/config.yaml.
+plugins:
+  conscious-agency:
+    enabled: true
+    inject_context: true
+    database_path: "$HERMES_HOME/conscious-agency/agency.db"
+    database_encryption: false
+    database_key_env: "CONSCIOUS_AGENCY_DB_KEY"
+    timezone: "Europe/Paris"
+    quiet_hours_start: "22:30"
+    quiet_hours_end: "08:30"
+    allow_scheduled_reflection: true
+    allow_proactive_messages: false
+    require_prior_user_interaction: true
+    daily_message_limit: 2
+    cooldown_hours: 6
+    minimum_user_silence_hours: 4
+    maximum_message_chars: 600
+    store_transcript_excerpts: false
+    excerpt_char_limit: 800
+    context_char_limit: 4000
+    event_retention_days: 30
+    maximum_events: 2000
+    maximum_reflections_per_tick: 1
+    maximum_state_changes_per_tick: 3
+    cron_schedule: "every 3h"
+    cron_delivery: "local"
+    cron_name: "Hermes Conscious Agency Tick"
+    manual_run_timeout_seconds: 660

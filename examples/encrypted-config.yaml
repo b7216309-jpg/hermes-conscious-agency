@@ -1,0 +1,12 @@
+# Minimal isolated example. Merge the conscious-agency section into your real config.
+plugins:
+  enabled:
+    - conscious-agency
+  conscious-agency:
+    database_path: "$HERMES_HOME/conscious-agency/agency-encrypted.db"
+    database_encryption: true
+    database_key_env: "CONSCIOUS_AGENCY_DB_KEY"
+    allow_scheduled_reflection: true
+    allow_proactive_messages: false
+    require_prior_user_interaction: true
+    cron_delivery: "local"
