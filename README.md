@@ -12,10 +12,14 @@ reflect in silence and, when every hard gate passes, send a concise proactive me
 > consciousness, sentience, feelings, or an inner life. Its "drives" are inspectable software
 > control signals.
 
-![Hermes Conscious Agency computational core](assets/conscious-agency-hero.png)
-
-*A computational agency core: durable intentions, episodic continuity, reflection, and a guarded
-outbound channel around one inspectable global workspace.*
+```mermaid
+flowchart LR
+    C["Conversation"] --> E["Event ledger"] --> W["Global workspace"]
+    W --> I["Intentions"] --> R["Reflection"]
+    R --> G{"All policy gates pass?"}
+    G -->|"no"| S["Audited silence"]
+    G -->|"yes"| O["Bounded check-in"]
+```
 
 ## What it adds
 
@@ -38,11 +42,6 @@ It does not add browser, shell, file, messaging, purchasing, or account permissi
 proactive cycle, all non-agency tools are blocked after the required `tick` call.
 
 ## How the loop works
-
-![Hermes Conscious Agency exploded architecture flow](assets/architecture-flow-3d.png)
-
-*From left to right: conversation events enter encrypted durable state, reach the global workspace,
-inform intentions and reflection, pass deterministic policy gates, and end in an auditable decision.*
 
 ```mermaid
 flowchart LR
@@ -332,10 +331,18 @@ explicit user/operator surfaces.
 
 ## Safety model
 
-![Hermes Conscious Agency independent proactive safety gates](assets/safety-gates-3d.png)
-
-*A proactive message must pass every independent gate. Any missing permission, timing condition,
-decision commit, or runtime dependency collapses the path to silence.*
+```mermaid
+flowchart LR
+    T["Scheduled tick"] --> P{"Plugin enabled?"}
+    P -->|"no"| S["Record silence"]
+    P -->|"yes"| U{"Proactivity opted in?"}
+    U -->|"no"| S
+    U -->|"yes"| Q{"Timing, budget, and attention valid?"}
+    Q -->|"no"| S
+    Q -->|"yes"| C{"Exact message committed?"}
+    C -->|"no"| S
+    C -->|"yes"| O["Verified output"]
+```
 
 The plugin uses layered controls:
 
