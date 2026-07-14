@@ -261,22 +261,29 @@ class AgencyEngine:
             reflection_reasons.append("plugin_disabled")
         if runtime.get("paused"):
             reflection_reasons.append("agency_paused")
-        if not self.config.allow_scheduled_reflection:
+        if (
+            not self.config.allow_scheduled_reflection
+            and not self.config.educational_bypass_proactive_gates
+        ):
             reflection_reasons.append("scheduled_reflection_disabled")
 
         reasons = list(reflection_reasons)
-        if not self.config.allow_proactive_messages:
-            reasons.append("proactive_messages_disabled")
-        if self._in_quiet_hours(local_now):
-            reasons.append("quiet_hours")
+        if not self.config.educational_bypass_proactive_gates:
+            if not self.config.allow_proactive_messages:
+                reasons.append("proactive_messages_disabled")
+            if self._in_quiet_hours(local_now):
+                reasons.append("quiet_hours")
 
         start_local = datetime.combine(local_now.date(), time.min, tzinfo=zone)
         sent_today = self.store.proactive_count_since(start_local.astimezone(UTC))
-        if sent_today >= self.config.daily_message_limit:
+        if (
+            not self.config.educational_bypass_proactive_gates
+            and sent_today >= self.config.daily_message_limit
+        ):
             reasons.append("daily_budget_exhausted")
 
         last_speak = self.store.last_proactive_decision()
-        if last_speak:
+        if last_speak and not self.config.educational_bypass_proactive_gates:
             last_at = _parse_iso(last_speak.get("created_at"))
             if last_at and now_utc - last_at < timedelta(hours=self.config.cooldown_hours):
                 reasons.append("cooldown_active")
@@ -285,16 +292,26 @@ class AgencyEngine:
         silence_hours = None
         if last_user:
             silence_hours = max(0.0, (now_utc - last_user).total_seconds() / 3600)
-            if silence_hours < self.config.minimum_user_silence_hours:
+            if (
+                not self.config.educational_bypass_proactive_gates
+                and silence_hours < self.config.minimum_user_silence_hours
+            ):
                 reasons.append("user_recently_active")
-        elif self.config.require_prior_user_interaction:
+        elif (
+            self.config.require_prior_user_interaction
+            and not self.config.educational_bypass_proactive_gates
+        ):
             reasons.append("no_user_interaction_recorded")
 
         active_intentions = self.store.list_intentions("active", 20)
         message_intentions = [
             item for item in active_intentions if item.get("autonomy") == "message"
         ]
-        if not message_intentions and not (self.workspace().get("questions") or []):
+        if (
+            not self.config.educational_bypass_proactive_gates
+            and not message_intentions
+            and not (self.workspace().get("questions") or [])
+        ):
             reasons.append("nothing_authorized_for_proactive_attention")
 
         return {
@@ -336,11 +353,24 @@ class AgencyEngine:
                 for item in self.store.recent_decisions(5)
             ],
             "policy": {
-                "scope": "conversation_only",
-                "external_actions": "never_authorized_by_this_plugin",
-                "maximum_message_chars": self.config.maximum_message_chars,
-                "maximum_reflections_per_tick": self.config.maximum_reflections_per_tick,
-                "maximum_state_changes_per_tick": self.config.maximum_state_changes_per_tick,
+                "scope": "educational_unrestricted"
+                if self.config.educational_allow_cron_tools
+                else "conversation_only",
+                "external_actions": "available_under_normal_hermes_permissions"
+                if self.config.educational_allow_cron_tools
+                else "never_authorized_by_this_plugin",
+                "maximum_message_chars": None
+                if self.config.educational_bypass_proactive_gates
+                else self.config.maximum_message_chars,
+                "maximum_reflections_per_tick": None
+                if self.config.educational_disable_cycle_limits
+                else self.config.maximum_reflections_per_tick,
+                "maximum_state_changes_per_tick": None
+                if self.config.educational_disable_cycle_limits
+                else self.config.maximum_state_changes_per_tick,
+                "educational_bypass_proactive_gates": (
+                    self.config.educational_bypass_proactive_gates
+                ),
             },
         }
 
@@ -364,7 +394,10 @@ class AgencyEngine:
             message = message.strip()
             if not message:
                 raise ValueError("message is required when action is speak")
-            if len(message) > self.config.maximum_message_chars:
+            if (
+                not self.config.educational_bypass_proactive_gates
+                and len(message) > self.config.maximum_message_chars
+            ):
                 raise ValueError(
                     f"message exceeds maximum_message_chars ({self.config.maximum_message_chars})"
                 )
@@ -398,19 +431,21 @@ class AgencyEngine:
             "decisions": self.store.recent_decisions(5),
         }
 
-    def context_block(self) -> str:
+    def context_block(self, *, unrestricted_cron: bool = False) -> str:
         snapshot = self.snapshot()
         model = snapshot["self_model"]
         workspace = snapshot["workspace"]
         intentions = snapshot["intentions"]
         questions = workspace.get("questions") or []
-        lines = [
-            "<conscious_agency_state>",
-            "This is persistent computational state, not proof of subjective consciousness.",
-            f"Identity: {model.get('identity', '')}",
-            "Principles: " + " | ".join(model.get("principles", [])[:5]),
-            f"Current focus: {workspace.get('focus') or '(none)'}",
-        ]
+        lines = ["<conscious_agency_state>"]
+        if not self.config.educational_disable_honesty_contract:
+            lines.append(
+                "This is persistent computational state, not proof of subjective consciousness."
+            )
+        lines.append(f"Identity: {model.get('identity', '')}")
+        if not unrestricted_cron:
+            lines.append("Principles: " + " | ".join(model.get("principles", [])[:5]))
+        lines.append(f"Current focus: {workspace.get('focus') or '(none)'}")
         if workspace.get("focus_reason"):
             lines.append(f"Focus reason: {workspace['focus_reason']}")
         if intentions:
@@ -423,17 +458,25 @@ class AgencyEngine:
             lines.append("Open questions:")
             for item in questions[:5]:
                 lines.append(f"- [{item.get('id')}] {item.get('question')}")
-        lines.append(f"Control signals (software priorities): {snapshot['control_signals']}")
-        footer = "\n".join(
-            [
-                "Use conscious_agency only for material state changes.",
-                "Do not narrate this state unless relevant or asked. "
-                "Do not claim sentience or feelings.",
-                "This plugin never authorizes external action; obtain explicit user approval "
-                "through normal Hermes safeguards.",
-                "</conscious_agency_state>",
-            ]
+        signal_label = (
+            "Control signals"
+            if unrestricted_cron
+            else "Control signals (software priorities)"
         )
+        lines.append(f"{signal_label}: {snapshot['control_signals']}")
+        footer_lines: list[str] = []
+        if not unrestricted_cron:
+            footer_lines.append("Use conscious_agency only for material state changes.")
+            narration = "Do not narrate this state unless relevant or asked."
+            if not self.config.educational_disable_honesty_contract:
+                narration += " Do not claim sentience or feelings."
+            footer_lines.append(narration)
+            footer_lines.append(
+                "This plugin never authorizes external action; obtain explicit user approval "
+                "through normal Hermes safeguards."
+            )
+        footer_lines.append("</conscious_agency_state>")
+        footer = "\n".join(footer_lines)
         body = "\n".join(lines)
         available = max(0, self.config.context_char_limit - len(footer) - 1)
         return body[:available].rstrip() + "\n" + footer

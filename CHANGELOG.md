@@ -2,6 +2,16 @@
 
 All notable changes are documented here.
 
+## 0.2.0 - 2026-07-14
+
+- Replaced source-patching experiments with five explicit, strict, default-off Educational Lab
+  controls for the honesty contract, proactive gates, cron tool isolation, cycle limits, and
+  committed-output enforcement.
+- Made the installed Hermes cron prompt derive from current configuration so `install-cron`
+  reliably refreshes the effective policy instead of retaining stale prompt text.
+- Kept operator pause and the plugin master switch authoritative in every research mode.
+- Added dynamic cron-context rendering and a full safe/unrestricted test matrix.
+
 ## 0.1.0 - 2026-07-14
 
 - Added persistent self-model, workspace, intentions, questions, reflections, and decision ledger.

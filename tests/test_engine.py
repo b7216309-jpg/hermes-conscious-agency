@@ -57,6 +57,29 @@ def test_recent_user_activity_blocks_proactivity(config):
     assert "user_recently_active" in engine.evaluate_tick()["blocked_by"]
 
 
+def test_educational_override_bypasses_plugin_speech_gates_but_respects_pause(config_factory):
+    config = config_factory(
+        allow_proactive_messages=False,
+        allow_scheduled_reflection=False,
+        require_prior_user_interaction=True,
+        educational_bypass_proactive_gates=True,
+    )
+    engine = AgencyEngine(AgencyStore(config), config)
+    tick = engine.evaluate_tick(datetime(2026, 7, 14, 23, tzinfo=UTC))
+    assert tick["eligible"] is True
+    assert tick["blocked_by"] == []
+    assert tick["policy"]["educational_bypass_proactive_gates"] is True
+    message = "x" * (config.maximum_message_chars + 10)
+    assert engine.record_decision("speak", "Educational test", message=message)[
+        "delivery_text"
+    ] == message
+
+    engine.pause("operator stop")
+    paused = engine.evaluate_tick(datetime(2026, 7, 14, 23, tzinfo=UTC))
+    assert paused["eligible"] is False
+    assert "agency_paused" in paused["blocked_by"]
+
+
 def test_fresh_install_cannot_message_before_a_real_user_turn(config):
     engine = AgencyEngine(AgencyStore(config), config)
     engine.store.add_intention("Check in", autonomy="message")
@@ -88,6 +111,13 @@ def test_context_is_honest_and_compact(config_factory):
     assert "not proof of subjective consciousness" in text
     assert "never authorizes external action" in text
     assert len(text) <= 1000
+
+
+def test_context_honesty_contract_can_be_disabled_explicitly(config_factory):
+    config = config_factory(educational_disable_honesty_contract=True)
+    text = AgencyEngine(AgencyStore(config), config).context_block()
+    assert "not proof of subjective consciousness" not in text
+    assert "Do not claim sentience or feelings" not in text
 
 
 def test_silent_decision_is_valid_when_speaking_is_disabled(config_factory):

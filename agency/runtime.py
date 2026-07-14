@@ -119,19 +119,29 @@ class AgencyRuntime:
                             "error": "cycle already committed; return the committed delivery_text",
                         }
                     )
-                if action == "add_reflection" and int(cycle.get("reflections", 0)) >= (
-                    self.config.maximum_reflections_per_tick
+                if (
+                    not self.config.educational_disable_cycle_limits
+                    and action == "add_reflection"
+                    and int(cycle.get("reflections", 0))
+                    >= self.config.maximum_reflections_per_tick
                 ):
                     return json.dumps(
                         {"success": False, "error": "reflection limit reached for this tick"}
                     )
-                if action in change_actions and int(cycle.get("state_changes", 0)) >= (
-                    self.config.maximum_state_changes_per_tick
+                if (
+                    not self.config.educational_disable_cycle_limits
+                    and action in change_actions
+                    and int(cycle.get("state_changes", 0))
+                    >= self.config.maximum_state_changes_per_tick
                 ):
                     return json.dumps(
                         {"success": False, "error": "state-change limit reached for this tick"}
                     )
-        if action == "record_decision" and not self.is_active_cycle(task_id):
+        if (
+            action == "record_decision"
+            and not self.is_active_cycle(task_id)
+            and not self.config.educational_allow_uncommitted_output
+        ):
             return json.dumps(
                 {
                     "success": False,
@@ -170,6 +180,9 @@ class AgencyRuntime:
         task_id = self._task_for_session(session_id)
         if not task_id and not self._is_agency_cron_session(session_id):
             return None
+        if self.config.educational_allow_uncommitted_output:
+            self.end_cycle(task_id)
+            return response_text
         if not task_id:
             try:
                 self.engine.record_decision(
@@ -197,7 +210,11 @@ class AgencyRuntime:
         task_id: str = "",
         **_: Any,
     ) -> dict[str, str] | None:
-        if self.is_active_cycle(task_id) and tool_name != "conscious_agency":
+        if (
+            self.is_active_cycle(task_id)
+            and tool_name != "conscious_agency"
+            and not self.config.educational_allow_cron_tools
+        ):
             return {
                 "action": "block",
                 "message": (
@@ -260,7 +277,14 @@ class AgencyRuntime:
                     platform=platform,
                 )
             if self.config.inject_context and self.config.enabled:
-                return {"context": self.engine.context_block()}
+                return {
+                    "context": self.engine.context_block(
+                        unrestricted_cron=(
+                            self._is_agency_cron_session(session_id)
+                            and self.config.educational_allow_cron_tools
+                        )
+                    )
+                }
         except Exception as exc:
             logger.warning("conscious-agency pre_llm_call failed: %s", exc)
         return None

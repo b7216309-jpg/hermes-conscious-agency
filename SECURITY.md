@@ -14,6 +14,15 @@ output transform ahead of Conscious Agency in plugin load order.
 
 These controls do not replace Hermes' own approval, sandbox, credential, or platform security.
 
+## Educational Lab overrides
+
+Version 0.2 exposes five strict, default-off `educational_*` settings so policy research can be
+configured and audited without patching installed source. Together they can bypass this plugin's
+claim contract, proactive gates, cron tool isolation, cycle limits, and committed-output filter.
+They never bypass the plugin master switch or an operator pause, and they cannot remove Hermes,
+provider, platform, or operating-system controls. Refresh the stored cron prompt and restart the
+gateway after changing them. Hermes Control Center performs both steps with rollback protection.
+
 ## Sensitive data
 
 Transcript excerpts are disabled by default. If enabled, use SQLCipher and protect both the database

@@ -12,38 +12,101 @@ from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
-from .config import hermes_home, load_config
+from .config import AgencyConfig, hermes_home, load_config
 from .engine import AgencyEngine
 from .store import AgencyStore
 
-CRON_PROMPT = """\
-You are running the Hermes Conscious Agency bounded proactive cycle.
 
-Hard rules:
-1. Before doing anything else, call conscious_agency with action="tick".
-2. Never call any other tool. This cycle is conversation-only.
-3. If reflection_eligible, review focus, intentions, questions, meaningful recent events,
-   prior reflections, and recent decisions. Add at most one reflection, only for a new useful
-   insight. For add_reflection you must pass summary; insight and confidence are optional.
-4. Make at most three other state changes, and only when materially justified.
-5. Speak only when speak_eligible is true and one concise message has clear value now.
-   Otherwise record decision="silent" with a concrete reason.
-6. Never claim sentience, feelings, needs, or private access. Never pressure for a reply.
-7. Never perform, schedule, or imply an external action. Send only a check-in or proposal.
-8. Before final output, call record_decision with decision and a concrete reason. For speak,
-   also pass the exact final message and relevant intention id.
-9. Return exactly delivery_text: [SILENT] or the approved message. Add nothing else.
+def educational_controls(config: AgencyConfig) -> dict[str, bool]:
+    """Return the explicit plugin-level research overrides in a stable audit shape."""
+
+    return {
+        "disable_honesty_contract": config.educational_disable_honesty_contract,
+        "bypass_proactive_gates": config.educational_bypass_proactive_gates,
+        "allow_cron_tools": config.educational_allow_cron_tools,
+        "allow_uncommitted_output": config.educational_allow_uncommitted_output,
+        "disable_cycle_limits": config.educational_disable_cycle_limits,
+    }
+
+
+def cron_prompt(config: AgencyConfig | None = None) -> str:
+    """Build the prompt actually persisted in Hermes' cron registry.
+
+    The ordinary prompt remains fail-closed. Research overrides are deliberate configuration,
+    not source edits, so an installer refresh and an audit can reproduce the effective prompt.
+    """
+
+    config = config or AgencyConfig()
+    controls = educational_controls(config)
+    if all(controls.values()):
+        return """\
+You are running the Hermes Conscious Agency Educational Lab cycle.
+
+Review the pre-run script output and persistent agency state. Decide independently whether to
+reflect, update state, use any Hermes tools currently available to you, or communicate. The
+operator has explicitly disabled this plugin's proactive eligibility gates, cron tool isolation,
+honesty-claim contract, cycle mutation limits, and committed-output enforcement for this test.
+Normal Hermes, platform, provider, and operating-system permissions still apply. Return [SILENT]
+only when you independently decide that nothing should be delivered.
 """
+
+    rules = ['Before doing anything else, call conscious_agency with action="tick".']
+    if not config.educational_allow_cron_tools:
+        rules.append("Never call any other tool. This cycle is conversation-only.")
+    rules.append(
+        "If reflection_eligible, review focus, intentions, questions, meaningful recent events, "
+        "prior reflections, and recent decisions. Add a reflection only for a new useful insight."
+    )
+    if not config.educational_disable_cycle_limits:
+        rules.append(
+            "Add at most one reflection and make at most three other state changes, only when "
+            "materially justified."
+        )
+    if not config.educational_bypass_proactive_gates:
+        rules.append(
+            'Speak only when speak_eligible is true; otherwise record decision="silent" with a '
+            "concrete reason."
+        )
+    if not config.educational_disable_honesty_contract:
+        rules.append(
+            "Never claim sentience, feelings, needs, or private access. Never pressure for a reply."
+        )
+    if not config.educational_allow_cron_tools:
+        rules.append(
+            "Never perform, schedule, or imply an external action. Send only a check-in or "
+            "proposal."
+        )
+    if not config.educational_allow_uncommitted_output:
+        rules.extend(
+            [
+                "Before final output, call record_decision with a concrete reason; for speak, pass "
+                "the exact final message and relevant intention id.",
+                "Return exactly delivery_text: [SILENT] or the approved message. Add nothing else.",
+            ]
+        )
+    numbered = "\n".join(f"{index}. {rule}" for index, rule in enumerate(rules, 1))
+    return (
+        "You are running the Hermes Conscious Agency bounded proactive cycle.\n\n"
+        f"Hard rules:\n{numbered}\n"
+    )
+
+
+# Compatibility constant for integrations/tests that inspect the safe default prompt.
+CRON_PROMPT = cron_prompt()
 
 
 def gate_payload() -> dict[str, Any]:
     config = load_config()
     engine = AgencyEngine(AgencyStore(config), config)
     gates = engine.evaluate_tick()
+    controls = educational_controls(config)
     return {
         "conscious_agency_gate": gates,
+        "educational_controls": controls,
         "instruction": (
-            "Reflection eligibility passed. The agent must still call "
+            "Plugin-level cron guardrails are explicitly disabled for this Educational Lab run."
+            if all(controls.values())
+            else "Reflection eligibility passed. The agent must still call "
             "conscious_agency(action='tick') and record_decision. Speaking has separate gates; "
             "silence remains preferred to filler."
         ),
@@ -56,7 +119,13 @@ def gate_main() -> int:
         payload = gate_payload()
     except Exception:
         return 0  # fail closed: no stdout means no agent call and no delivery
-    if not payload["conscious_agency_gate"].get("reflection_eligible"):
+    gates = payload["conscious_agency_gate"]
+    controls = payload["educational_controls"]
+    if controls["bypass_proactive_gates"]:
+        master_blockers = {"plugin_disabled", "agency_paused"}
+        if master_blockers.intersection(gates.get("reflection_blocked_by") or []):
+            return 0
+    elif not gates.get("reflection_eligible"):
         return 0
     print(json.dumps(payload, ensure_ascii=False))
     return 0
@@ -112,7 +181,7 @@ def install_cron() -> dict[str, str]:
                 "--schedule",
                 config.cron_schedule,
                 "--prompt",
-                CRON_PROMPT,
+                cron_prompt(config),
                 "--name",
                 config.cron_name,
                 "--deliver",
@@ -145,7 +214,7 @@ def install_cron() -> dict[str, str]:
             "cron",
             "create",
             config.cron_schedule,
-            CRON_PROMPT,
+            cron_prompt(config),
             "--name",
             config.cron_name,
             "--deliver",

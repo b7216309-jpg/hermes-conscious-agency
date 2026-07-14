@@ -47,6 +47,13 @@ class AgencyConfig:
     cron_delivery: str = "local"
     cron_name: str = "Hermes Conscious Agency Tick"
     manual_run_timeout_seconds: int = 660
+    # Default-off research controls. These affect only this plugin; Hermes and provider-level
+    # permissions remain authoritative. The Control Center keeps them behind Educational Lab.
+    educational_disable_honesty_contract: bool = False
+    educational_bypass_proactive_gates: bool = False
+    educational_allow_cron_tools: bool = False
+    educational_allow_uncommitted_output: bool = False
+    educational_disable_cycle_limits: bool = False
 
     def validate(self) -> AgencyConfig:
         boolean_fields = (
@@ -57,6 +64,11 @@ class AgencyConfig:
             "allow_proactive_messages",
             "require_prior_user_interaction",
             "store_transcript_excerpts",
+            "educational_disable_honesty_contract",
+            "educational_bypass_proactive_gates",
+            "educational_allow_cron_tools",
+            "educational_allow_uncommitted_output",
+            "educational_disable_cycle_limits",
         )
         integer_fields = (
             "daily_message_limit",

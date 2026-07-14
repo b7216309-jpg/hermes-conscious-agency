@@ -174,6 +174,9 @@ plugins:
     cron_delivery: "local"   # local, telegram, discord, signal, or platform:chat_id
     cron_name: "Hermes Conscious Agency Tick"
     manual_run_timeout_seconds: 660
+
+    # Educational Lab controls are intentionally omitted from normal setup. See the advanced
+    # research section below. Every one defaults to false.
 ```
 
 Defaults are conservative:
@@ -355,6 +358,42 @@ The final-output verifier requires a Hermes release that supports the `transform
 hook. Avoid stacking another plugin that replaces output before Conscious Agency's transform; Hermes
 uses the first non-empty transform result. Retain conservative budgets and inspect the decision
 ledger during initial testing.
+
+<details>
+<summary>Educational Lab: plugin-level guardrail overrides</summary>
+
+Version 0.2 adds explicit configuration for controlled research. These switches are all `false` by
+default and are best operated through Hermes Control Center, which requires a timed Lab unlock,
+exact confirmation, configuration backup, cron refresh, gateway restart, and hash-chained audit.
+
+```yaml
+plugins:
+  conscious-agency:
+    educational_disable_honesty_contract: true
+    educational_bypass_proactive_gates: true
+    educational_allow_cron_tools: true
+    educational_allow_uncommitted_output: true
+    educational_disable_cycle_limits: true
+```
+
+With all five enabled, this plugin removes its sentience/emotion claim contract, scheduled and
+speech eligibility gates, cron tool isolation, per-cycle mutation limits, and final-output commit
+filter. The prompt stored in Hermes cron must be refreshed after any change:
+
+```bash
+hermes conscious-agency install-cron
+hermes gateway restart
+```
+
+These settings do not remove Hermes core permissions, provider policies, platform restrictions,
+operating-system access controls, the plugin master `enabled` switch, or an operator pause. They
+materially increase the chance of unwanted tool use, messages, and state changes.
+
+Hermes 0.18.2 independently prepends a delivery wrapper to every cron run, including `[SILENT]`
+suppression and advice not to duplicate automatic delivery with `send_message`. That upstream
+wrapper is outside this plugin and has no supported per-job disable switch in that release.
+
+</details>
 
 ## Privacy and data
 

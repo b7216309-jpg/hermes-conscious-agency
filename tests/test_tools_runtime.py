@@ -120,6 +120,52 @@ def test_uncommitted_cron_output_fails_closed(tmp_path, monkeypatch):
     assert "without record_decision" in decision["reason"]
 
 
+def test_educational_cron_allows_tools_limits_and_uncommitted_output(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_disable_honesty_contract: true\n"
+        "    educational_bypass_proactive_gates: true\n"
+        "    educational_allow_cron_tools: true\n"
+        "    educational_allow_uncommitted_output: true\n"
+        "    educational_disable_cycle_limits: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+    session = "cron_job-1_educational"
+    task = "educational-task"
+    assert parsed(runtime.tool_handler({"action": "tick"}, task_id=task, session_id=session))[
+        "success"
+    ]
+    assert runtime.pre_tool_call("terminal", {}, task_id=task) is None
+    for number in range(6):
+        result = runtime.tool_handler(
+            {"action": "set_focus", "focus": f"Research {number}"}, task_id=task
+        )
+        assert parsed(result)["success"]
+    assert runtime.transform_llm_output("free-form result", session_id=session) == (
+        "free-form result"
+    )
+
+
+def test_educational_cron_context_omits_plugin_contract(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_disable_honesty_contract: true\n"
+        "    educational_allow_cron_tools: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+    context = runtime.pre_llm_call(session_id="cron_job-1_lab")["context"]
+    assert "not proof of subjective consciousness" not in context
+    assert "Do not claim sentience" not in context
+    assert "never authorizes external action" not in context
+    assert "Principles:" not in context
+
+
 def test_non_agency_output_is_never_transformed(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     runtime = AgencyRuntime()

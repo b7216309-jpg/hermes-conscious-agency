@@ -21,6 +21,12 @@ def test_loads_current_hermes_plugin_shape(tmp_path):
     config = load_config(path)
     assert config.allow_proactive_messages is True
     assert config.daily_message_limit == 3
+    assert config.educational_bypass_proactive_gates is False
+
+
+def test_educational_controls_are_strict_booleans():
+    with pytest.raises(ValueError, match="educational_allow_cron_tools"):
+        AgencyConfig(educational_allow_cron_tools="yes").validate()
 
 
 def test_rejects_unknown_setting_as_likely_typo(tmp_path):
