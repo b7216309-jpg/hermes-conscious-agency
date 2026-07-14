@@ -12,6 +12,11 @@ reflect in silence and, when every hard gate passes, send a concise proactive me
 > consciousness, sentience, feelings, or an inner life. Its "drives" are inspectable software
 > control signals.
 
+![Hermes Conscious Agency computational core](assets/conscious-agency-hero.png)
+
+*A computational agency core: durable intentions, episodic continuity, reflection, and a guarded
+outbound channel around one inspectable global workspace.*
+
 ## What it adds
 
 - A persistent **self-model** with principles, capabilities, limitations, and observations.
@@ -33,6 +38,11 @@ It does not add browser, shell, file, messaging, purchasing, or account permissi
 proactive cycle, all non-agency tools are blocked after the required `tick` call.
 
 ## How the loop works
+
+![Hermes Conscious Agency exploded architecture flow](assets/architecture-flow-3d.png)
+
+*From left to right: conversation events enter encrypted durable state, reach the global workspace,
+inform intentions and reflection, pass deterministic policy gates, and end in an auditable decision.*
 
 ```mermaid
 flowchart LR
@@ -268,6 +278,27 @@ hermes conscious-agency remove-cron
 Rerunning `install-cron` refreshes the existing job's schedule, prompt, delivery target, and gate
 script without creating a duplicate. A stale recorded job ID is replaced automatically.
 
+## Enable proactive check-ins
+
+Keep the conservative defaults during initial reflection testing. When the decision ledger looks
+healthy, explicitly enable proactive messages and point cron delivery at the conversation or home
+channel already configured in Hermes:
+
+```bash
+hermes config set plugins.conscious-agency.allow_proactive_messages true
+hermes config set plugins.conscious-agency.require_prior_user_interaction true
+hermes config set plugins.conscious-agency.cron_delivery origin
+hermes conscious-agency install-cron
+hermes gateway restart
+hermes conscious-agency status
+```
+
+`origin` uses the job's originating conversation when available and otherwise Hermes' configured
+home channel. Have at least one normal conversation with Hermes after installing the plugin; the
+default prior-interaction gate intentionally blocks a fresh installation from contacting anyone.
+Quiet hours, the four-hour recent-user window, six-hour cooldown, daily limit, authorized
+`message` intention, exact-output verifier, and all other gates remain active after opt-in.
+
 ## Day-to-day controls
 
 ```bash
@@ -298,13 +329,18 @@ explicit user/operator surfaces.
 
 ## Safety model
 
+![Hermes Conscious Agency independent proactive safety gates](assets/safety-gates-3d.png)
+
+*A proactive message must pass every independent gate. Any missing permission, timing condition,
+decision commit, or runtime dependency collapses the path to silence.*
+
 The plugin uses layered controls:
 
 1. **No new action authority.** Its only proactive output is the cron agent's final text.
 2. **Conversation-only tool isolation.** After `tick`, every non-agency tool is blocked for that
    task ID.
-3. **Independent hard speech gates.** Enabled flag, pause state, outbound opt-in, quiet hours, daily
-   budget, cooldown, recent user activity, and authorized attention are all required.
+3. **Independent hard speech gates.** Enabled flag, pause state, outbound opt-in, prior and recent
+   user activity, quiet hours, daily budget, cooldown, and authorized attention are all required.
 4. **Second gate at commit.** `record_decision(decision="speak")` reevaluates policy immediately.
 5. **Authoritative output transform.** Hermes' final-response transform replaces model output with
    the exact committed `delivery_text`. Missing `tick` or `record_decision` becomes `[SILENT]`.

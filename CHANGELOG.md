@@ -24,3 +24,5 @@ All notable changes are documented here.
   proactive speech.
 - Hardened ledger invariants, schema downgrade detection, sidecar permissions, internal-turn
   filtering, single-decision cycles, and soft-failure handling for Hermes cron commands.
+- Added a coordinated set of 3D architecture, agency-core, and proactive-safety visuals plus a
+  complete opt-in procedure for real Hermes home-channel delivery.
