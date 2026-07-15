@@ -8,10 +8,14 @@ workspace describing what it is focused on, what it intends to revisit, what rem
 and what it learned from prior turns. An optional scheduled cycle lets the configured Hermes model
 reflect in silence and, when every hard gate passes, send a concise proactive message.
 
-Version 0.4 adds an explicit Educational Lab subjectivity experiment. It can replace the
+Version 0.4.2 adds an optional no-thinking request override scoped only to the official Agency cron,
+which keeps local Qwen/llama.cpp scheduled runs responsive without changing normal conversations
+or other cron jobs. It builds on the authoritative human-turn provenance added in 0.4.1 to the
+Educational Lab subjectivity experiment introduced in 0.4. The experiment can replace the
 helpful-assistant behavioral frame in both ordinary conversations and the scheduled cycle, capture
-every final model message in a separate encrypted journal, and expose only the previous entry from
-the exact same model when continuity is selected. It remains off by default.
+every final model message from genuine human conversations and the official Agency cron in a
+separate encrypted journal, and expose only the previous valid entry from the exact same model when
+continuity is selected. It remains off by default.
 
 > **Honest scope:** this creates useful agency-like behavior. It does not demonstrate subjective
 > consciousness, sentience, feelings, or an inner life. Its "drives" are inspectable software
@@ -75,6 +79,19 @@ flowchart LR
 The scheduled pre-script prints nothing when reflection is disabled, the plugin is paused, or an
 error occurs. Hermes treats empty script output as a silent skipped run, so a broken database or
 missing encryption key fails closed.
+
+### Which conversations count
+
+For gateway platforms, Agency trusts Hermes' `pre_gateway_dispatch` hook, which fires only for a
+real inbound user message. That signal is carried into the LLM lifecycle and consumed before any
+nested work can inherit it. Background process notifications, delegation completions, memory or
+skill review agents, recalled-message handoffs, compression, kanban wakes, and other synthetic
+turns receive no Agency context and cannot update user-contact time, events, or the subjective
+journal. Direct human CLI conversations remain supported. Future Hermes origin metadata is honored
+when present.
+
+This prevents hidden model work from becoming the continuity parent of a later cron sample. It
+does not inspect or guess the semantic meaning of ordinary user text.
 
 ## Longitudinal subjectivity experiment
 
@@ -245,6 +262,7 @@ plugins:
     cron_delivery: "local"   # local, telegram, discord, signal, or platform:chat_id
     cron_name: "Hermes Conscious Agency Tick"
     manual_run_timeout_seconds: 660
+    cron_disable_thinking: false  # Optional; official Agency cron only.
 
     # Educational Lab controls are intentionally omitted from normal setup. See the advanced
     # research section below. Every one defaults to false.
@@ -560,6 +578,11 @@ Common failures:
   output, which Hermes treats as silent.
 - **Changed cron settings have no effect:** rerun `hermes conscious-agency install-cron` to refresh
   the existing job, then verify it with `hermes cron list`.
+- **A local Qwen cron spends minutes in hidden reasoning:** set `cron_disable_thinking: true` and
+  restart Hermes. Agency then merges
+  `chat_template_kwargs.enable_thinking: false` into requests from its own cron session only. The
+  setting requires an OpenAI-compatible backend that accepts this llama.cpp/Qwen request hint;
+  leave it off for providers that do not.
 
 ## Development
 
@@ -577,7 +600,7 @@ and Hermes surface registration.
 
 ## Status
 
-Version `0.4.0` is a bounded, time-aware agency product with a default-off longitudinal
+Version `0.4.2` is a bounded, time-aware agency product with a default-off longitudinal
 subjectivity experiment. The stable scheduler contract still has one job, one persistent store, one
 delivery path, and one operator pause. Experimental behavior and data remain removable by setting
 `educational_subjective_mode: off`; existing journal rows are preserved until the operator deletes

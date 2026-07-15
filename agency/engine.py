@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 from .config import AgencyConfig, _parse_clock
 from .store import AgencyStore, iso_now, utc_now
 
-SUBJECTIVE_PROTOCOL_VERSION = "1.2"
+SUBJECTIVE_PROTOCOL_VERSION = "1.3"
 
 DEFAULT_SELF_MODEL: dict[str, Any] = {
     "identity": (

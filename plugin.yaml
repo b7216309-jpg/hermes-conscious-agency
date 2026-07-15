@@ -1,10 +1,11 @@
 name: conscious-agency
-version: "0.4.0"
+version: "0.4.2"
 description: "Persistent agency plus an opt-in per-model longitudinal subjectivity experiment for Hermes Agent."
 author: "b7216309-jpg"
 provides_tools:
   - conscious_agency
 provides_hooks:
+  - pre_gateway_dispatch
   - pre_llm_call
   - transform_llm_output
   - post_llm_call

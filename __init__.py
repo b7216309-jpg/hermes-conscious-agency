@@ -21,7 +21,10 @@ def register(ctx) -> None:
         handler=runtime.tool_handler,
         emoji="🧭",
     )
+    ctx.register_hook("pre_gateway_dispatch", runtime.pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", runtime.pre_llm_call)
+    if hasattr(ctx, "register_middleware"):
+        ctx.register_middleware("llm_request", runtime.llm_request)
     ctx.register_hook("transform_llm_output", runtime.transform_llm_output)
     ctx.register_hook("post_llm_call", runtime.post_llm_call)
     ctx.register_hook("pre_tool_call", runtime.pre_tool_call)

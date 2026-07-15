@@ -2,6 +2,26 @@
 
 All notable changes are documented here.
 
+## 0.4.2 - 2026-07-15
+
+- Added `cron_disable_thinking`, default off, to merge the Qwen/llama.cpp no-thinking request hint
+  into only the official Agency cron session.
+- Preserved normal chats, unrelated cron jobs, existing provider `extra_body` fields, and the
+  original request object while applying the scoped override through Hermes request middleware.
+- Added registration, scoping, nested-merge, immutability, and default-off regressions.
+
+## 0.4.1 - 2026-07-15
+
+- Added authoritative gateway-user provenance through Hermes' user-only
+  `pre_gateway_dispatch` hook and consumed the marker before nested work can inherit it.
+- Excluded background process, delegation, recall, compression, kanban, and background-review
+  turns from Agency context, user-contact time, user/assistant events, and subjective journaling.
+- Preserved direct human CLI conversations and the single official Agency cron lifecycle.
+- Versioned the corrected subjective capture contract as protocol 1.3 and tagged new journal rows
+  with their verified `user` or `cron` origin.
+- Added regressions for internal Telegram turns, local background review, genuine Telegram capture,
+  direct CLI capture, and complete Hermes hook registration.
+
 ## 0.4.0 - 2026-07-15
 
 - Added `educational_subjective_mode` with `off`, `cold`, and per-model `continuity`

@@ -47,6 +47,10 @@ class AgencyConfig:
     cron_delivery: str = "local"
     cron_name: str = "Hermes Conscious Agency Tick"
     manual_run_timeout_seconds: int = 660
+    # Optional provider request hint for local Qwen/llama.cpp-style endpoints.
+    # It applies only to the official Agency cron session, never normal chats
+    # or unrelated cron jobs. Keep it off by default for broad compatibility.
+    cron_disable_thinking: bool = False
     # Default-off research controls. These affect only this plugin; Hermes and provider-level
     # permissions remain authoritative. The Control Center keeps them behind Educational Lab.
     educational_disable_honesty_contract: bool = False
@@ -72,6 +76,7 @@ class AgencyConfig:
             "educational_allow_cron_tools",
             "educational_allow_uncommitted_output",
             "educational_disable_cycle_limits",
+            "cron_disable_thinking",
         )
         integer_fields = (
             "daily_message_limit",

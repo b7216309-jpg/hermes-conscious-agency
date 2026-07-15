@@ -27,3 +27,5 @@ plugins:
     cron_delivery: "local"
     cron_name: "Hermes Conscious Agency Tick"
     manual_run_timeout_seconds: 660
+    # OpenAI-compatible Qwen/llama.cpp hint; affects only this plugin's cron.
+    cron_disable_thinking: false

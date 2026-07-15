@@ -11,12 +11,16 @@ class FakeContext:
         self.hooks = {}
         self.commands = {}
         self.cli = {}
+        self.middleware = {}
 
     def register_tool(self, **kwargs):
         self.tools[kwargs["name"]] = kwargs
 
     def register_hook(self, name, handler):
         self.hooks[name] = handler
+
+    def register_middleware(self, name, handler):
+        self.middleware[name] = handler
 
     def register_command(self, name, handler=None, **kwargs):
         self.commands[name] = handler or kwargs.get("handler")
@@ -46,6 +50,7 @@ def test_registers_complete_hermes_surface(tmp_path, monkeypatch):
     plugin.register(context)
     assert set(context.tools) == {"conscious_agency"}
     assert set(context.hooks) == {
+        "pre_gateway_dispatch",
         "pre_llm_call",
         "transform_llm_output",
         "post_llm_call",
@@ -58,3 +63,4 @@ def test_registers_complete_hermes_surface(tmp_path, monkeypatch):
     }
     assert "agency" in context.commands
     assert "conscious-agency" in context.cli
+    assert set(context.middleware) == {"llm_request"}

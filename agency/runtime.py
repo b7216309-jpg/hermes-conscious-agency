@@ -11,6 +11,12 @@ from typing import Any
 
 from .config import load_config
 from .engine import SUBJECTIVE_PROTOCOL_VERSION, AgencyEngine
+from .origin import (
+    begin_llm_turn,
+    finish_llm_turn,
+    mark_gateway_user_dispatch,
+    should_capture_current_turn,
+)
 from .store import AgencyStore
 from .tools import handle_agency
 
@@ -37,6 +43,32 @@ class AgencyRuntime:
         self._cron_job_id = str(self.store.get_meta("cron_job_id", "") or "")
         self._cycle_lock = threading.RLock()
         self._active_cycles: dict[str, dict[str, Any]] = {}
+
+    def pre_gateway_dispatch(self, event: Any = None, **kwargs: Any) -> None:
+        mark_gateway_user_dispatch(event=event, **kwargs)
+
+    def llm_request(
+        self, request: dict[str, Any], session_id: str = "", **_: Any
+    ) -> dict[str, Any] | None:
+        """Optionally disable hidden reasoning for the official Agency cron.
+
+        Hermes request middleware receives the provider kwargs immediately
+        before transport execution.  Copy each nested mapping so the original
+        request remains untouched and merge, rather than replace, provider
+        extras supplied by the operator.
+        """
+        if not self.config.cron_disable_thinking or not self._is_agency_cron_session(session_id):
+            return None
+        updated = dict(request)
+        extra_body = dict(updated.get("extra_body") or {})
+        chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+        chat_template_kwargs["enable_thinking"] = False
+        extra_body["chat_template_kwargs"] = chat_template_kwargs
+        updated["extra_body"] = extra_body
+        return {
+            "request": updated,
+            "metadata": {"agency_cron_disable_thinking": True},
+        }
 
     def _is_agency_cron_session(self, session_id: str) -> bool:
         try:
@@ -127,6 +159,7 @@ class AgencyRuntime:
                 metadata={
                     "platform": str(platform or "")[:80],
                     "capture_stage": "final_output",
+                    "turn_origin": "user" if source == "conversation" else "cron",
                 },
             )
             return True
@@ -328,8 +361,9 @@ class AgencyRuntime:
         user_message: str = "",
         platform: str = "",
         task_id: str = "",
+        turn_id: str = "",
         model: str = "",
-        **_: Any,
+        **kwargs: Any,
     ) -> dict[str, str] | None:
         try:
             current_user_turn = False
@@ -346,15 +380,30 @@ class AgencyRuntime:
                     task_id=task_id,
                     summary="Scheduled agent turn started",
                 )
-            elif _is_user_session(session_id, platform) and user_message.strip():
+            else:
+                current_user_turn = begin_llm_turn(
+                    session_id=session_id,
+                    platform=platform,
+                    user_message=user_message,
+                    turn_id=turn_id,
+                    kwargs=kwargs,
+                )
+            if (
+                current_user_turn
+                and _is_user_session(session_id, platform)
+                and user_message.strip()
+            ):
                 self.engine.record_user_turn(
                     user_message,
                     session_id=session_id,
                     task_id=task_id,
                     platform=platform,
                 )
-                current_user_turn = True
-            if self.config.inject_context and self.config.enabled:
+            if (
+                self.config.inject_context
+                and self.config.enabled
+                and (_is_cron_session(session_id) or current_user_turn)
+            ):
                 return {
                     "context": self.engine.context_block(
                         current_user_turn=current_user_turn,
@@ -388,7 +437,7 @@ class AgencyRuntime:
                     summary="Scheduled agent turn finished",
                     metadata={"message_chars": len(assistant_response)},
                 )
-            elif _is_user_session(session_id, platform):
+            elif _is_user_session(session_id, platform) and should_capture_current_turn(turn_id):
                 self._record_subjective_output(
                     assistant_response,
                     source="conversation",
@@ -407,6 +456,9 @@ class AgencyRuntime:
             self.store.prune_events()
         except Exception as exc:
             logger.debug("conscious-agency post_llm_call failed: %s", exc)
+        finally:
+            if not _is_cron_session(session_id):
+                finish_llm_turn(turn_id)
 
     def session_event(
         self, kind: str, session_id: str = "", platform: str = "", **kwargs: Any

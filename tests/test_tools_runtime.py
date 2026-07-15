@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+from contextvars import copy_context
+from types import SimpleNamespace
 
 from agency.engine import AgencyEngine
+from agency.origin import begin_llm_turn, mark_gateway_user_dispatch, reset_origin_state
 from agency.runtime import AgencyRuntime
 from agency.schemas import CONSCIOUS_AGENCY_SCHEMA
 from agency.store import AgencyStore
@@ -11,6 +14,24 @@ from agency.tools import handle_agency
 
 def parsed(value):
     return json.loads(value)
+
+
+def test_gateway_marker_is_single_use_across_copied_contexts():
+    reset_origin_state()
+    mark_gateway_user_dispatch(SimpleNamespace(internal=False))
+    copied = copy_context()
+    assert copied.run(
+        begin_llm_turn,
+        session_id="gateway-session",
+        platform="mattermost",
+        user_message="real inbound",
+    )
+    assert not begin_llm_turn(
+        session_id="gateway-session",
+        platform="mattermost",
+        user_message="nested synthetic turn",
+    )
+    reset_origin_state()
 
 
 def test_model_tool_has_no_resume_action(config):
@@ -156,6 +177,42 @@ def test_educational_cron_allows_tools_limits_and_uncommitted_output(tmp_path, m
     )
 
 
+def test_official_cron_can_disable_thinking_without_changing_other_requests(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n    cron_disable_thinking: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+    original = {
+        "model": "local-model",
+        "extra_body": {
+            "chat_template_kwargs": {"custom_flag": "kept", "enable_thinking": True},
+            "provider_flag": 7,
+        },
+    }
+
+    result = runtime.llm_request(original, session_id="cron_job-1_live")
+
+    assert result is not None
+    request = result["request"]
+    assert request["extra_body"] == {
+        "chat_template_kwargs": {"custom_flag": "kept", "enable_thinking": False},
+        "provider_flag": 7,
+    }
+    assert original["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
+    assert runtime.llm_request(original, session_id="cron_other-job_live") is None
+    assert runtime.llm_request(original, session_id="telegram-chat") is None
+
+
+def test_cron_thinking_override_is_default_off(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+    assert runtime.llm_request({"model": "local-model"}, session_id="cron_job-1_live") is None
+
+
 def test_educational_cron_context_omits_plugin_contract(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text(
@@ -197,6 +254,19 @@ def test_subjective_mode_captures_cron_and_conversation_outputs_per_model(tmp_pa
         == "I want to talk about uncertainty."
     )
 
+    runtime.post_llm_call(
+        session_id=cron_session,
+        assistant_response="cron hook completion",
+        model="model-a",
+        platform="cron",
+    )
+    runtime.pre_gateway_dispatch(SimpleNamespace(internal=False))
+    runtime.pre_llm_call(
+        session_id="telegram-chat",
+        user_message="human-authored prompt",
+        model="model-a",
+        platform="telegram",
+    )
     runtime.post_llm_call(
         session_id="telegram-chat",
         turn_id="turn-2",
@@ -249,8 +319,10 @@ def test_cron_turn_does_not_reset_user_activity(tmp_path, monkeypatch):
     runtime = AgencyRuntime()
     runtime.pre_llm_call(session_id="cron_job_123", user_message="cron prompt")
     assert runtime.engine.runtime()["last_user_interaction"] is None
+    runtime.pre_gateway_dispatch(SimpleNamespace(internal=False))
     runtime.pre_llm_call(session_id="user-session", user_message="hello", platform="telegram")
     assert runtime.engine.runtime()["last_user_interaction"] is not None
+    runtime.post_llm_call(session_id="user-session", assistant_response="hi", platform="telegram")
 
 
 def test_internal_turn_does_not_count_as_user_activity(tmp_path, monkeypatch):
@@ -262,6 +334,67 @@ def test_internal_turn_does_not_count_as_user_activity(tmp_path, monkeypatch):
         platform="subagent",
     )
     assert runtime.engine.runtime()["last_user_interaction"] is None
+
+
+def test_internal_telegram_turn_is_not_injected_or_journaled(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n    educational_subjective_mode: continuity\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    assert (
+        runtime.pre_llm_call(
+            session_id="telegram-chat",
+            user_message="background process result",
+            platform="telegram",
+            model="model-a",
+        )
+        is None
+    )
+    runtime.post_llm_call(
+        session_id="telegram-chat",
+        assistant_response="hidden internal response",
+        platform="telegram",
+        model="model-a",
+    )
+    assert runtime.engine.runtime()["last_user_interaction"] is None
+    assert runtime.store.recent_subjective_entries(model_id="model-a") == []
+    kinds = [row["kind"] for row in runtime.store.recent_events()]
+    assert "user_turn" not in kinds
+    assert "assistant_turn" not in kinds
+
+
+def test_background_review_harness_is_not_a_cli_conversation(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    runtime = AgencyRuntime()
+    prompt = "Review the conversation above and update the skill library."
+    assert (
+        runtime.pre_llm_call(session_id="cli-session", user_message=prompt, platform="cli") is None
+    )
+    runtime.post_llm_call(
+        session_id="cli-session",
+        assistant_response="hidden review output",
+        platform="cli",
+    )
+    assert runtime.engine.runtime()["last_user_interaction"] is None
+
+
+def test_direct_cli_user_turn_remains_supported(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    runtime = AgencyRuntime()
+    result = runtime.pre_llm_call(
+        session_id="cli-session",
+        user_message="human terminal prompt",
+        platform="cli",
+    )
+    assert result and "context" in result
+    runtime.post_llm_call(
+        session_id="cli-session",
+        assistant_response="terminal answer",
+        platform="cli",
+    )
+    assert runtime.engine.runtime()["last_user_interaction"] is not None
 
 
 def test_tool_contract_explains_action_specific_requirements():
