@@ -146,3 +146,42 @@ def test_tick_filters_telemetry_and_includes_meaningful_history(config):
     ]
     assert tick["recent_decisions"][0]["reason"] == "No timely value"
     assert tick["recent_decisions"][0]["message"] == ""
+
+
+def test_normal_context_preserves_previous_interaction_and_temporal_state(config_factory):
+    config = config_factory(context_char_limit=12000, timezone="Europe/Paris")
+    engine = AgencyEngine(AgencyStore(config), config)
+    first = datetime(2026, 7, 14, 7, 0, tzinfo=UTC)
+    second = datetime(2026, 7, 15, 7, 0, tzinfo=UTC)
+    engine.record_user_turn("first", session_id="telegram", platform="telegram", now=first)
+    engine.record_user_turn("second", session_id="telegram", platform="telegram", now=second)
+    engine.set_focus("Finish the temporal memory layer")
+    engine.store.add_intention(
+        "Run the live simulation",
+        due_at="2026-07-16T07:00:00+02:00",
+        autonomy="propose",
+    )
+    engine.add_question("Did every migration pass?")
+    engine.add_self_observation("Temporal context improves continuity")
+    engine.store.add_reflection("continuity", "Old memories need explicit event time")
+
+    text = engine.context_block(current_user_turn=True, now=second)
+
+    assert "Temporal orientation: Wednesday, 2026-07-15 09:00:00 CEST" in text
+    assert "Previous genuine user interaction: 2026-07-14 09:00:00 CEST (1 day ago)" in text
+    assert "due 2026-07-16 07:00:00 CEST" in text
+    assert "opened" in text
+    assert "Recent self-observations:" in text
+    assert "Recent reflections:" in text
+
+
+def test_cron_context_uses_last_real_user_interaction_not_previous_one(config_factory):
+    config = config_factory(context_char_limit=12000, timezone="Europe/Paris")
+    engine = AgencyEngine(AgencyStore(config), config)
+    interaction = datetime(2026, 7, 15, 5, 0, tzinfo=UTC)
+    now = datetime(2026, 7, 15, 9, 0, tzinfo=UTC)
+    engine.record_user_turn("hello", now=interaction)
+
+    text = engine.context_block(now=now)
+
+    assert "Previous genuine user interaction: 2026-07-15 07:00:00 CEST (4 hours ago)" in text

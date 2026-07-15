@@ -255,6 +255,7 @@ class AgencyRuntime:
         **_: Any,
     ) -> dict[str, str] | None:
         try:
+            current_user_turn = False
             if _is_cron_session(session_id):
                 task = self._task_for_session(session_id)
                 if task:
@@ -275,13 +276,15 @@ class AgencyRuntime:
                     task_id=task_id,
                     platform=platform,
                 )
+                current_user_turn = True
             if self.config.inject_context and self.config.enabled:
                 return {
                     "context": self.engine.context_block(
+                        current_user_turn=current_user_turn,
                         unrestricted_cron=(
                             self._is_agency_cron_session(session_id)
                             and self.config.educational_allow_cron_tools
-                        )
+                        ),
                     )
                 }
         except Exception as exc:

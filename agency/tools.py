@@ -63,6 +63,7 @@ def handle_agency(engine: AgencyEngine, args: dict[str, Any], **kwargs: Any) -> 
                 priority=args.get("priority"),
                 title=args.get("title"),
                 rationale=args.get("rationale"),
+                due_at=args.get("due_at") if "due_at" in args else None,
             )
             return _result(item) if item else _error("intention not found")
         if action == "set_focus":

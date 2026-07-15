@@ -36,6 +36,13 @@ def test_tool_crud_and_errors(config):
     )["result"]
     listed = parsed(handle_agency(engine, {"action": "list_intentions"}))["result"]
     assert listed[0]["id"] == item["id"]
+    updated = parsed(
+        handle_agency(
+            engine,
+            {"action": "update_intention", "id": item["id"], "due_at": "2026-07-20"},
+        )
+    )["result"]
+    assert updated["due_at"] is not None
 
 
 def test_runtime_binds_and_isolates_proactive_cycle(tmp_path, monkeypatch):

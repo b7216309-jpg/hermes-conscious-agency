@@ -43,6 +43,7 @@ DEFAULT_SELF_MODEL: dict[str, Any] = {
 DEFAULT_WORKSPACE: dict[str, Any] = {
     "focus": "",
     "focus_reason": "",
+    "focus_updated_at": None,
     "questions": [],
     "notes": [],
 }
@@ -51,6 +52,8 @@ DEFAULT_RUNTIME: dict[str, Any] = {
     "paused": False,
     "pause_reason": "",
     "last_user_interaction": None,
+    "previous_user_interaction": None,
+    "previous_session_id": "",
     "last_session_id": "",
     "last_platform": "",
     "consecutive_silent_ticks": 0,
@@ -79,6 +82,38 @@ def _parse_iso(value: str | None) -> datetime | None:
     except (TypeError, ValueError):
         return None
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _relative_time(value: datetime, now: datetime) -> str:
+    delta = (value - now).total_seconds()
+    future = delta > 0
+    seconds = abs(delta)
+    if seconds < 45:
+        return "now"
+    units = (
+        (31557600.0, "year"),
+        (2629800.0, "month"),
+        (604800.0, "week"),
+        (86400.0, "day"),
+        (3600.0, "hour"),
+        (60.0, "minute"),
+    )
+    amount, label = 1, "minute"
+    for unit_seconds, unit_label in units:
+        if seconds >= unit_seconds:
+            amount = max(1, int(round(seconds / unit_seconds)))
+            label = unit_label
+            break
+    quantity = f"{amount} {label}{'' if amount == 1 else 's'}"
+    return f"in {quantity}" if future else f"{quantity} ago"
+
+
+def _context_time(value: str | None, *, now_utc: datetime, zone: ZoneInfo) -> str:
+    parsed = _parse_iso(value)
+    if parsed is None:
+        return ""
+    local = parsed.astimezone(zone)
+    return f"{local.strftime('%Y-%m-%d %H:%M:%S %Z')} ({_relative_time(parsed, now_utc)})"
 
 
 class AgencyEngine:
@@ -119,14 +154,18 @@ class AgencyEngine:
         session_id: str = "",
         task_id: str = "",
         platform: str = "",
+        now: datetime | None = None,
     ) -> None:
         summary = "User interaction recorded"
         metadata: dict[str, Any] = {"message_chars": len(user_message)}
         if self.config.store_transcript_excerpts and self.config.excerpt_char_limit:
             metadata["excerpt"] = user_message[: self.config.excerpt_char_limit]
-        now = iso_now()
+        runtime = {**DEFAULT_RUNTIME, **self.runtime()}
+        timestamp = (now or utc_now()).astimezone(UTC).isoformat()
         self._update_runtime(
-            last_user_interaction=now,
+            previous_user_interaction=runtime.get("last_user_interaction"),
+            previous_session_id=str(runtime.get("last_session_id") or ""),
+            last_user_interaction=timestamp,
             last_session_id=session_id,
             last_platform=platform,
             consecutive_silent_ticks=0,
@@ -164,6 +203,7 @@ class AgencyEngine:
         workspace = {**DEFAULT_WORKSPACE, **self.workspace()}
         workspace["focus"] = focus.strip()[:500]
         workspace["focus_reason"] = reason.strip()[:1000]
+        workspace["focus_updated_at"] = iso_now()
         self.store.set_meta("workspace", workspace)
         self.store.add_event("focus_changed", summary=workspace["focus"] or "Focus cleared")
         return workspace
@@ -420,21 +460,31 @@ class AgencyEngine:
             self.store.update_intention(intention_id, considered=True)
         return {**decision, "delivery_text": "[SILENT]"}
 
-    def snapshot(self) -> dict[str, Any]:
+    def snapshot(self, now: datetime | None = None) -> dict[str, Any]:
         return {
             "self_model": self.self_model(),
             "workspace": self.workspace(),
             "runtime": self.runtime(),
-            "control_signals": self.control_signals(),
+            "control_signals": self.control_signals(now),
             "intentions": self.store.list_intentions("active", 10),
             "reflections": self.store.recent_reflections(5),
             "decisions": self.store.recent_decisions(5),
         }
 
-    def context_block(self, *, unrestricted_cron: bool = False) -> str:
-        snapshot = self.snapshot()
+    def context_block(
+        self,
+        *,
+        unrestricted_cron: bool = False,
+        current_user_turn: bool = False,
+        now: datetime | None = None,
+    ) -> str:
+        now_utc = (now or utc_now()).astimezone(UTC)
+        zone = ZoneInfo(self.config.timezone)
+        local_now = now_utc.astimezone(zone)
+        snapshot = self.snapshot(now_utc)
         model = snapshot["self_model"]
         workspace = snapshot["workspace"]
+        runtime = snapshot["runtime"]
         intentions = snapshot["intentions"]
         questions = workspace.get("questions") or []
         lines = ["<conscious_agency_state>"]
@@ -445,19 +495,80 @@ class AgencyEngine:
         lines.append(f"Identity: {model.get('identity', '')}")
         if not unrestricted_cron:
             lines.append("Principles: " + " | ".join(model.get("principles", [])[:5]))
+        lines.append(
+            f"Temporal orientation: {local_now.strftime('%A, %Y-%m-%d %H:%M:%S %Z')} "
+            f"({self.config.timezone})."
+        )
+        prior_user_value = (
+            runtime.get("previous_user_interaction")
+            if current_user_turn
+            else runtime.get("last_user_interaction")
+        )
+        prior_user = _context_time(str(prior_user_value or ""), now_utc=now_utc, zone=zone)
+        if prior_user:
+            lines.append(f"Previous genuine user interaction: {prior_user}.")
+        else:
+            lines.append("Previous genuine user interaction: none recorded.")
         lines.append(f"Current focus: {workspace.get('focus') or '(none)'}")
         if workspace.get("focus_reason"):
             lines.append(f"Focus reason: {workspace['focus_reason']}")
+        focus_updated = _context_time(
+            str(workspace.get("focus_updated_at") or ""), now_utc=now_utc, zone=zone
+        )
+        if focus_updated:
+            lines.append(f"Focus last changed: {focus_updated}.")
         if intentions:
             lines.append("Active intentions:")
             for item in intentions[:6]:
+                temporal_parts = []
+                created = _context_time(
+                    str(item.get("created_at") or ""), now_utc=now_utc, zone=zone
+                )
+                due = _context_time(str(item.get("due_at") or ""), now_utc=now_utc, zone=zone)
+                updated = _context_time(
+                    str(item.get("updated_at") or ""), now_utc=now_utc, zone=zone
+                )
+                if created:
+                    temporal_parts.append(f"created {created}")
+                if due:
+                    temporal_parts.append(f"due {due}")
+                if updated and updated != created:
+                    temporal_parts.append(f"updated {updated}")
+                temporal = f" ({'; '.join(temporal_parts)})" if temporal_parts else ""
                 lines.append(
-                    f"- [{item['id']}] p{item['priority']} / {item['autonomy']}: {item['title']}"
+                    f"- [{item['id']}] p{item['priority']} / {item['autonomy']}: "
+                    f"{item['title']}{temporal}"
                 )
         if questions:
             lines.append("Open questions:")
             for item in questions[:5]:
-                lines.append(f"- [{item.get('id')}] {item.get('question')}")
+                created = _context_time(
+                    str(item.get("created_at") or ""), now_utc=now_utc, zone=zone
+                )
+                lines.append(
+                    f"- [{item.get('id')}] {item.get('question')}"
+                    + (f" (opened {created})" if created else "")
+                )
+        observations = list(model.get("observations") or [])[-3:]
+        if observations:
+            lines.append("Recent self-observations:")
+            for item in reversed(observations):
+                created = _context_time(
+                    str(item.get("created_at") or ""), now_utc=now_utc, zone=zone
+                )
+                lines.append(
+                    f"- {item.get('observation')}" + (f" (recorded {created})" if created else "")
+                )
+        reflections = list(snapshot.get("reflections") or [])[:2]
+        if reflections:
+            lines.append("Recent reflections:")
+            for item in reflections:
+                created = _context_time(
+                    str(item.get("created_at") or ""), now_utc=now_utc, zone=zone
+                )
+                lines.append(
+                    f"- {item.get('summary')}" + (f" (recorded {created})" if created else "")
+                )
         signal_label = (
             "Control signals" if unrestricted_cron else "Control signals (software priorities)"
         )

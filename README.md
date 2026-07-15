@@ -8,6 +8,10 @@ workspace describing what it is focused on, what it intends to revisit, what rem
 and what it learned from prior turns. An optional scheduled cycle lets the configured Hermes model
 reflect in silence and, when every hard gate passes, send a concise proactive message.
 
+Version 0.3 makes that workspace time-aware. Each injected context states the current localized
+time, the elapsed time since the previous genuine user interaction, and the age or deadline of
+focus, questions, intentions, observations, and reflections.
+
 > **Honest scope:** this creates useful agency-like behavior. It does not demonstrate subjective
 > consciousness, sentience, feelings, or an inner life. Its "drives" are inspectable software
 > control signals.
@@ -26,6 +30,8 @@ flowchart LR
 - A persistent **self-model** with principles, capabilities, limitations, and observations.
 - A compact **global workspace** containing current focus and unresolved questions.
 - Durable **intentions** with priority, status, rationale, and an explicit initiative ceiling.
+- Explicit **temporal orientation** with current local time, previous-user-contact age, state ages,
+  and validated intention deadlines.
 - Model-written **reflections** with confidence and an audit trail.
 - Transparent control signals for curiosity, completion pressure, coherence, social contact, and
   caution. They are derived values, not hidden feelings or learned rewards.
@@ -74,8 +80,8 @@ These analogies are design tools, not biological claims:
 
 | Plugin mechanism | Loose cognitive analogy | What it actually is |
 |---|---|---|
-| Global workspace | Working memory / attention | A compact JSON document injected into each turn |
-| Intentions | Prospective memory / executive goals | Prioritized SQLite records with explicit status |
+| Global workspace | Working memory / attention | A compact JSON document with localized time and state ages injected into each turn |
+| Intentions | Prospective memory / executive goals | Prioritized SQLite records with explicit status and optional UTC deadline |
 | Reflections | Metacognition | Model-authored summaries stored with confidence |
 | Control signals | Drives | Deterministic normalized counters derived from visible state |
 | Quiet hours and budgets | Inhibitory control | Hard code-level gates checked again before speech |
@@ -198,6 +204,11 @@ Configuration is strict and fail-closed. Unknown names, quoted booleans such as 
 YAML, invalid types, and unsafe numeric ranges are rejected instead of being silently converted or
 replaced with defaults.
 
+`timezone` must be an IANA name such as `Europe/Paris`. Naive intention dates/times are interpreted
+in this zone and stored in UTC; injected context renders them back in the configured local zone.
+The context distinguishes the previous genuine user turn from cron, internal, and current-turn
+activity, so “time since last chat” is not reset by the hook that is reporting it.
+
 ## Encrypt the database
 
 Install SQLCipher into the Python environment that runs Hermes. The exact environment depends on
@@ -247,6 +258,7 @@ hermes conscious-agency add-intention \
   "Ask for feedback after the first week of real use" \
   --priority 80 \
   --autonomy message \
+  --due-at 2026-07-22T18:00:00+02:00 \
   --rationale "A short check-in can uncover usability failures"
 ```
 
@@ -308,6 +320,8 @@ hermes conscious-agency status
 hermes conscious-agency snapshot
 hermes conscious-agency events --limit 50
 hermes conscious-agency intentions --status active
+hermes conscious-agency update-intention INTENTION_ID --due-at 2026-07-22
+hermes conscious-agency update-intention INTENTION_ID --clear-due
 hermes conscious-agency update-intention INTENTION_ID --status completed
 hermes conscious-agency tick
 hermes conscious-agency pause "Reviewing behavior"
@@ -412,6 +426,11 @@ The SQLite database contains:
 - `reflections`: model-authored insights;
 - `decisions`: silence/speech reasons and exact proposed messages.
 
+Workspace/runtime JSON retains focus-change time and the current/previous genuine user interaction
+times. Intentions store ISO-8601 UTC deadlines. Events, reflections, decisions, and intention rows
+retain their own creation/update timestamps, so the model can tell when state was formed without
+confusing that with when a remembered real-world event occurred in the separate memory plugin.
+
 By default, event records contain message character counts but no user or assistant text. Setting
 `store_transcript_excerpts: true` stores the first `excerpt_char_limit` characters of each turn and
 therefore materially increases privacy risk. Encryption is strongly recommended if excerpts are
@@ -482,11 +501,11 @@ pytest
 
 Tests cover persistence, retention, configuration compatibility, quiet hours across midnight,
 cooldowns, daily budgets, recent-user protection, independent reflection/speech gates, fail-closed
-encryption, tool isolation, mutation limits, honest context, and Hermes surface registration.
+encryption, tool isolation, mutation limits, honest and temporal context, deadline normalization,
+and Hermes surface registration.
 
 ## Status
 
-Version `0.1.0` is an intentionally bounded MVP. The next useful research directions are salience
-decay, contradiction-aware self-model updates, intention dependencies, reflection quality scoring,
-and a Hermes core delivery-authorization hook. None should weaken the current explicit-authority
-boundary.
+Version `0.3.0` is a bounded, time-aware research product. Useful future directions include
+intention dependencies, reflection quality scoring, and a Hermes core delivery-authorization hook.
+None should weaken the current explicit-authority boundary.

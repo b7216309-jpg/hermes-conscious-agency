@@ -86,3 +86,17 @@ def test_newer_database_schema_fails_closed(config):
     store.set_meta("schema_version", 999)
     with pytest.raises(RuntimeError, match="newer than supported"):
         AgencyStore(config)
+
+
+def test_intention_due_dates_are_normalized_updated_cleared_and_validated(config):
+    store = AgencyStore(config)
+    intention = store.add_intention("Timed work", due_at="2026-07-16T07:00:00+02:00")
+    assert intention["due_at"] == "2026-07-16T05:00:00+00:00"
+
+    updated = store.update_intention(intention["id"], due_at="2026-07-17")
+    assert updated["due_at"] == "2026-07-16T22:00:00+00:00"
+    cleared = store.update_intention(intention["id"], due_at="")
+    assert cleared["due_at"] is None
+
+    with pytest.raises(ValueError, match="valid ISO-8601"):
+        store.add_intention("Bad deadline", due_at="tomorrow-ish")

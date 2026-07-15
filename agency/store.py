@@ -11,6 +11,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager, suppress
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from zoneinfo import ZoneInfo
 
 from .config import AgencyConfig
 
@@ -167,6 +168,18 @@ class AgencyStore:
             except OSError:
                 pass
 
+    def _normalize_due_at(self, value: Any) -> str | None:
+        if value is None or str(value).strip() == "":
+            return None
+        text = str(value).strip().replace("Z", "+00:00")
+        try:
+            parsed = datetime.fromisoformat(text)
+        except ValueError as exc:
+            raise ValueError("due_at must be a valid ISO-8601 date or date-time") from exc
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=ZoneInfo(self.config.timezone))
+        return parsed.astimezone(UTC).isoformat()
+
     @staticmethod
     def _json(value: Any) -> str:
         return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
@@ -298,7 +311,7 @@ class AgencyStore:
                     rationale.strip()[:2000],
                     max(0, min(int(priority), 100)),
                     autonomy,
-                    due_at,
+                    self._normalize_due_at(due_at),
                     source[:80],
                 ),
             )
@@ -357,6 +370,7 @@ class AgencyStore:
         priority: int | None = None,
         title: str | None = None,
         rationale: str | None = None,
+        due_at: str | None = None,
         considered: bool = False,
         acted: bool = False,
     ) -> dict[str, Any] | None:
@@ -378,6 +392,9 @@ class AgencyStore:
         if rationale is not None:
             updates.append("rationale = ?")
             params.append(rationale.strip()[:2000])
+        if due_at is not None:
+            updates.append("due_at = ?")
+            params.append(self._normalize_due_at(due_at))
         if considered:
             updates.append("last_considered_at = ?")
             params.append(iso_now())

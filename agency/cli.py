@@ -41,9 +41,13 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     add.add_argument("--rationale", default="")
     add.add_argument("--priority", type=int, default=50)
     add.add_argument("--autonomy", choices=["reflect", "propose", "message"], default="propose")
-    update = subs.add_parser("update-intention", help="Update intention status")
+    add.add_argument("--due-at", default=None, help="Optional ISO-8601 deadline")
+    update = subs.add_parser("update-intention", help="Update intention status or deadline")
     update.add_argument("id")
     update.add_argument("--status", choices=["active", "blocked", "completed", "cancelled"])
+    due_group = update.add_mutually_exclusive_group()
+    due_group.add_argument("--due-at", default=None, help="Set an ISO-8601 deadline")
+    due_group.add_argument("--clear-due", action="store_true", help="Clear the current deadline")
     tick = subs.add_parser("tick", help="Evaluate hard proactive gates without sending")
     tick.add_argument("--record-silent", action="store_true")
     subs.add_parser("install-cron", help="Install the bounded proactive cron job")
@@ -91,11 +95,13 @@ def cli_command(args: argparse.Namespace) -> int:
                     rationale=args.rationale,
                     priority=args.priority,
                     autonomy=args.autonomy,
+                    due_at=args.due_at,
                     source="operator",
                 )
             )
         elif action == "update-intention":
-            _print(engine.store.update_intention(args.id, status=args.status))
+            due_at = "" if args.clear_due else args.due_at
+            _print(engine.store.update_intention(args.id, status=args.status, due_at=due_at))
         elif action == "tick":
             gates = engine.evaluate_tick()
             _print(gates)

@@ -2,6 +2,22 @@
 
 All notable changes are documented here.
 
+## 0.3.0 - 2026-07-15
+
+- Added localized current time and elapsed time since the previous genuine user interaction to
+  normal conversation and scheduled reflection context.
+- Preserved the prior interaction before recording a new user turn, avoiding the misleading
+  “just now” continuity signal on every request.
+- Added absolute/relative timestamps for focus changes, unresolved questions, intentions,
+  deadlines, self-observations, and recent reflections.
+- Exposed recent self-observations and reflections in normal compact context instead of keeping
+  useful temporal state write-only.
+- Validated intention deadlines as ISO-8601, interpreted naive values in the configured timezone,
+  and stored them canonically in UTC.
+- Added model-tool, operator CLI, and Control Center support for setting, changing, and clearing
+  intention deadlines.
+- Added deterministic temporal-context, cron-continuity, deadline, CLI, and integration tests.
+
 ## 0.2.0 - 2026-07-14
 
 - Replaced source-patching experiments with five explicit, strict, default-off Educational Lab
