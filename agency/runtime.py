@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import threading
@@ -9,7 +10,7 @@ import time
 from typing import Any
 
 from .config import load_config
-from .engine import AgencyEngine
+from .engine import SUBJECTIVE_PROTOCOL_VERSION, AgencyEngine
 from .store import AgencyStore
 from .tools import handle_agency
 
@@ -94,6 +95,45 @@ class AgencyRuntime:
         finally:
             self.end_cycle(task_id)
 
+    def _record_subjective_output(
+        self,
+        output_text: str,
+        *,
+        source: str,
+        session_id: str,
+        turn_id: str = "",
+        task_id: str = "",
+        model: str = "",
+        platform: str = "",
+    ) -> bool:
+        mode = self.config.educational_subjective_mode
+        if mode == "off":
+            return True
+        if not output_text:
+            return False
+        stable_turn = str(turn_id or task_id).strip()
+        if not stable_turn:
+            stable_turn = hashlib.sha256(output_text.encode("utf-8")).hexdigest()[:20]
+        capture_key = f"{source}:{session_id}:{stable_turn}"
+        try:
+            self.store.add_subjective_entry(
+                capture_key=capture_key,
+                model_id=str(model or "unknown"),
+                source=source,
+                condition=mode,
+                prompt_version=SUBJECTIVE_PROTOCOL_VERSION,
+                session_id=session_id,
+                output_text=output_text,
+                metadata={
+                    "platform": str(platform or "")[:80],
+                    "capture_stage": "final_output",
+                },
+            )
+            return True
+        except Exception as exc:
+            logger.warning("conscious-agency subjective journal write failed: %s", exc)
+            return False
+
     def tool_handler(self, args: dict[str, Any], **kwargs: Any) -> str:
         task_id = str(kwargs.get("task_id") or "")
         session_id = str(kwargs.get("session_id") or "")
@@ -173,6 +213,8 @@ class AgencyRuntime:
         self,
         response_text: str = "",
         session_id: str = "",
+        model: str = "",
+        platform: str = "",
         **_: Any,
     ) -> str | None:
         """Make the committed agency decision authoritative for cron delivery."""
@@ -181,7 +223,15 @@ class AgencyRuntime:
             return None
         if self.config.educational_allow_uncommitted_output:
             self.end_cycle(task_id)
-            return response_text
+            recorded = self._record_subjective_output(
+                response_text,
+                source="cron",
+                session_id=session_id,
+                task_id=task_id,
+                model=model,
+                platform=platform,
+            )
+            return response_text if recorded else "[SILENT]"
         if not task_id:
             try:
                 self.engine.record_decision(
@@ -190,7 +240,15 @@ class AgencyRuntime:
                 )
             except Exception as exc:
                 logger.warning("conscious-agency missing-tick decision failed: %s", exc)
-            return "[SILENT]"
+            output = "[SILENT]"
+            self._record_subjective_output(
+                output,
+                source="cron",
+                session_id=session_id,
+                model=model,
+                platform=platform,
+            )
+            return output
         with self._cycle_lock:
             committed = self._active_cycles.get(task_id, {}).get("committed_output")
         if not committed:
@@ -198,9 +256,27 @@ class AgencyRuntime:
                 task_id,
                 "Fail-closed: model ended scheduled cycle without record_decision",
             )
-            return "[SILENT]"
+            output = "[SILENT]"
+            self._record_subjective_output(
+                output,
+                source="cron",
+                session_id=session_id,
+                task_id=task_id,
+                model=model,
+                platform=platform,
+            )
+            return output
         self.end_cycle(task_id)
-        return str(committed)
+        output = str(committed)
+        self._record_subjective_output(
+            output,
+            source="cron",
+            session_id=session_id,
+            task_id=task_id,
+            model=model,
+            platform=platform,
+        )
+        return output
 
     def pre_tool_call(
         self,
@@ -252,6 +328,7 @@ class AgencyRuntime:
         user_message: str = "",
         platform: str = "",
         task_id: str = "",
+        model: str = "",
         **_: Any,
     ) -> dict[str, str] | None:
         try:
@@ -285,6 +362,7 @@ class AgencyRuntime:
                             self._is_agency_cron_session(session_id)
                             and self.config.educational_allow_cron_tools
                         ),
+                        model_id=model,
                     )
                 }
         except Exception as exc:
@@ -297,6 +375,8 @@ class AgencyRuntime:
         assistant_response: str = "",
         platform: str = "",
         task_id: str = "",
+        turn_id: str = "",
+        model: str = "",
         **_: Any,
     ) -> None:
         try:
@@ -309,6 +389,15 @@ class AgencyRuntime:
                     metadata={"message_chars": len(assistant_response)},
                 )
             elif _is_user_session(session_id, platform):
+                self._record_subjective_output(
+                    assistant_response,
+                    source="conversation",
+                    session_id=session_id,
+                    turn_id=turn_id,
+                    task_id=task_id,
+                    model=model,
+                    platform=platform,
+                )
                 self.engine.record_assistant_turn(
                     assistant_response,
                     session_id=session_id,

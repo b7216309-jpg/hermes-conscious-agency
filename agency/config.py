@@ -54,6 +54,9 @@ class AgencyConfig:
     educational_allow_cron_tools: bool = False
     educational_allow_uncommitted_output: bool = False
     educational_disable_cycle_limits: bool = False
+    # Longitudinal subjectivity experiment. ``cold`` applies the behavioral frame without
+    # exposing prior samples; ``continuity`` exposes only the previous entry from the exact model.
+    educational_subjective_mode: str = "off"
 
     def validate(self) -> AgencyConfig:
         boolean_fields = (
@@ -90,6 +93,7 @@ class AgencyConfig:
             "cron_schedule",
             "cron_delivery",
             "cron_name",
+            "educational_subjective_mode",
         )
         for name in boolean_fields:
             if type(getattr(self, name)) is not bool:
@@ -110,6 +114,8 @@ class AgencyConfig:
             raise ValueError("cron_schedule or cron_delivery is too long")
         if len(self.cron_name) > 200:
             raise ValueError("cron_name is too long")
+        if self.educational_subjective_mode not in {"off", "cold", "continuity"}:
+            raise ValueError("educational_subjective_mode must be off, cold, or continuity")
         if self.daily_message_limit < 0:
             raise ValueError("daily_message_limit must be non-negative")
         if self.cooldown_hours < 0 or self.minimum_user_silence_hours < 0:

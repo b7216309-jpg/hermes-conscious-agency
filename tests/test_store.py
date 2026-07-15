@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import replace
 
 import pytest
@@ -27,6 +28,57 @@ def test_state_and_ledgers_round_trip(config):
 
     decision = store.add_decision("silent", "Nothing useful now")
     assert store.recent_decisions(1)[0]["id"] == decision["id"]
+
+
+def test_subjective_journal_is_exact_idempotent_and_separated_by_model(config):
+    store = AgencyStore(config)
+    first = store.add_subjective_entry(
+        capture_key="cron:session-1:turn-1",
+        model_id="model-a",
+        source="cron",
+        condition="continuity",
+        prompt_version="1.0",
+        session_id="session-1",
+        output_text="  I keep the exact spacing.  ",
+    )
+    duplicate = store.add_subjective_entry(
+        capture_key="cron:session-1:turn-1",
+        model_id="model-a",
+        source="cron",
+        condition="continuity",
+        prompt_version="1.0",
+        session_id="session-1",
+        output_text="different retry output",
+    )
+    second = store.add_subjective_entry(
+        capture_key="conversation:session-2:turn-2",
+        model_id="model-a",
+        source="conversation",
+        condition="continuity",
+        prompt_version="1.0",
+        session_id="session-2",
+        output_text="I changed my mind.",
+    )
+    other = store.add_subjective_entry(
+        capture_key="cron:session-3:turn-3",
+        model_id="model-b",
+        source="cron",
+        condition="continuity",
+        prompt_version="1.0",
+        session_id="session-3",
+        output_text="A separate model line.",
+    )
+
+    assert duplicate["id"] == first["id"]
+    assert duplicate["output_text"] == "  I keep the exact spacing.  "
+    assert second["prior_entry_id"] == first["id"]
+    assert other["prior_entry_id"] is None
+    assert store.latest_subjective_entry("model-a")["id"] == second["id"]
+    assert len(store.recent_subjective_entries(model_id="model-a")) == 2
+    summary = store.subjective_summary()
+    assert summary["entries"] == 3
+    assert summary["models"] == {"model-a": 2, "model-b": 1}
+    assert summary["continuity_links"] == 1
 
 
 def test_event_limit_is_enforced(tmp_path, config):
@@ -81,11 +133,40 @@ def test_store_returns_the_sanitized_values_it_persists(config):
     assert decision["reason"] == "no value"
 
 
-def test_newer_database_schema_fails_closed(config):
-    store = AgencyStore(config)
-    store.set_meta("schema_version", 999)
+def test_newer_database_schema_fails_closed_without_mutating_it(tmp_path, config):
+    path = tmp_path / "newer.db"
+    with sqlite3.connect(path) as conn:
+        conn.execute(
+            "CREATE TABLE meta ("
+            "key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)"
+        )
+        conn.execute(
+            "INSERT INTO meta(key, value, updated_at) VALUES ('schema_version', '999', 'now')"
+        )
+    newer = replace(config, database_path=str(path))
     with pytest.raises(RuntimeError, match="newer than supported"):
-        AgencyStore(config)
+        AgencyStore(newer)
+    with sqlite3.connect(path) as conn:
+        assert not conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='subjective_entries'"
+        ).fetchone()
+
+
+def test_schema_one_database_adds_subjective_journal_without_losing_state(config):
+    store = AgencyStore(config)
+    store.set_meta("kept", {"value": 7})
+    with store.connection() as conn:
+        conn.execute("DROP TABLE subjective_entries")
+    store.set_meta("schema_version", 1)
+
+    migrated = AgencyStore(config)
+
+    assert migrated.get_meta("kept") == {"value": 7}
+    assert migrated.get_meta("schema_version") == 2
+    with migrated.connection() as conn:
+        assert conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='subjective_entries'"
+        ).fetchone()
 
 
 def test_intention_due_dates_are_normalized_updated_cleared_and_validated(config):

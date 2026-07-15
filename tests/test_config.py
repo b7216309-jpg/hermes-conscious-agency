@@ -29,6 +29,12 @@ def test_educational_controls_are_strict_booleans():
         AgencyConfig(educational_allow_cron_tools="yes").validate()
 
 
+def test_subjective_mode_is_a_strict_research_condition():
+    assert AgencyConfig(educational_subjective_mode="continuity").validate()
+    with pytest.raises(ValueError, match="educational_subjective_mode"):
+        AgencyConfig(educational_subjective_mode="alive").validate()
+
+
 def test_rejects_unknown_setting_as_likely_typo(tmp_path):
     path = tmp_path / "config.yaml"
     path.write_text(

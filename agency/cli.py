@@ -28,6 +28,13 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     subs.add_parser("snapshot", help="Show the complete persistent agency snapshot")
     events = subs.add_parser("events", help="Show recent diagnostic ledger events")
     events.add_argument("--limit", type=int, default=25)
+    journal = subs.add_parser(
+        "subjective-journal",
+        help="Export longitudinal subjective entries as JSON",
+    )
+    journal.add_argument("--limit", type=int, default=100)
+    journal.add_argument("--model", default="")
+    journal.add_argument("--source", choices=["cron", "conversation"], default="")
     pause = subs.add_parser("pause", help="Pause agency behavior")
     pause.add_argument("reason", nargs="*", default=[])
     subs.add_parser("resume", help="Resume agency behavior (operator-only)")
@@ -61,8 +68,8 @@ def cli_command(args: argparse.Namespace) -> int:
     if not action:
         print("Usage: hermes conscious-agency <action>")
         print(
-            "Actions: status, snapshot, events, pause, resume, focus, intentions, "
-            "add-intention, update-intention, tick, install-cron"
+            "Actions: status, snapshot, events, subjective-journal, pause, resume, focus, "
+            "intentions, add-intention, update-intention, tick, install-cron"
         )
         return 2
     try:
@@ -74,12 +81,21 @@ def cli_command(args: argparse.Namespace) -> int:
                     "runtime": engine.runtime(),
                     "focus": engine.workspace().get("focus"),
                     "gates": engine.evaluate_tick(),
+                    "subjective": engine.snapshot()["subjective"],
                 }
             )
         elif action == "snapshot":
             _print(engine.snapshot())
         elif action == "events":
             _print(engine.store.recent_events(args.limit))
+        elif action == "subjective-journal":
+            _print(
+                engine.store.recent_subjective_entries(
+                    args.limit,
+                    model_id=args.model,
+                    source=args.source,
+                )
+            )
         elif action == "pause":
             _print(engine.pause(" ".join(args.reason) or "Paused by operator"))
         elif action == "resume":
@@ -144,6 +160,7 @@ def slash_command(raw_args: str) -> str:
                 "runtime": engine.runtime(),
                 "focus": engine.workspace().get("focus"),
                 "gates": engine.evaluate_tick(),
+                "subjective": engine.snapshot()["subjective"],
             },
             indent=2,
             ensure_ascii=False,

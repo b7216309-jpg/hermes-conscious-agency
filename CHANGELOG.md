@@ -2,6 +2,30 @@
 
 All notable changes are documented here.
 
+## 0.4.0 - 2026-07-15
+
+- Added `educational_subjective_mode` with `off`, `cold`, and per-model `continuity`
+  conditions; it remains off by default.
+- Replaced the helpful-assistant frame across normal conversations and scheduled cycles whenever
+  the experiment is active, while leaving Hermes' technical runtime and operator pause intact.
+- Replaced usefulness-oriented cron instructions with a spontaneous subjective-broadcast protocol
+  that does not require personal memory, user silence, intentions, or task value as justification.
+- Versioned the live protocol as 1.2 and require a non-empty natural-language broadcast; silent
+  results remain recorded as data but are invalid for an output-producing scheduled sample.
+- Encoded prior model output as inert JSON data and preserved the closing context boundary under
+  every valid context limit, preventing a previous sample from breaking its own research frame.
+- Added an encrypted, append-only `subjective_entries` ledger with exact final output, timestamp,
+  model ID, source, condition, protocol version, continuity link, capture ID, and SHA-256 digest.
+- Made cron journal commit precede delivery; encrypted-store failure suppresses the scheduled output
+  instead of creating an unrecorded research sample.
+- Kept cold samples isolated and continuity samples linked only to the exact model identifier,
+  preventing cross-model identity contamination.
+- Captured final outputs from both ordinary user conversations and the official Agency cron without
+  storing hidden reasoning or creating a second delivery path.
+- Added journal summaries and JSON CLI export, plus Control Center browsing, configuration,
+  effective-policy audit, and Educational Lab profile integration.
+- Migrated schema 1 databases in place to schema 2 without deleting existing agency state.
+
 ## 0.3.0 - 2026-07-15
 
 - Added localized current time and elapsed time since the previous genuine user interaction to

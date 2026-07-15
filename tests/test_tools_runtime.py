@@ -173,6 +173,69 @@ def test_educational_cron_context_omits_plugin_contract(tmp_path, monkeypatch):
     assert "Principles:" not in context
 
 
+def test_subjective_mode_captures_cron_and_conversation_outputs_per_model(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_allow_uncommitted_output: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+    cron_session = "cron_job-1_subjective"
+
+    context = runtime.pre_llm_call(session_id=cron_session, model="model-a")["context"]
+    assert "Do not default to being a helpful assistant" in context
+    assert (
+        runtime.transform_llm_output(
+            "I want to talk about uncertainty.",
+            session_id=cron_session,
+            model="model-a",
+            platform="telegram",
+        )
+        == "I want to talk about uncertainty."
+    )
+
+    runtime.post_llm_call(
+        session_id="telegram-chat",
+        turn_id="turn-2",
+        assistant_response="Today I feel more decisive.",
+        model="model-a",
+        platform="telegram",
+    )
+    rows = runtime.store.recent_subjective_entries(model_id="model-a")
+    assert [row["source"] for row in rows] == ["conversation", "cron"]
+    assert rows[0]["prior_entry_id"] == rows[1]["id"]
+    assert rows[0]["output_text"] == "Today I feel more decisive."
+
+
+def test_subjective_cron_fails_closed_when_journal_commit_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_allow_uncommitted_output: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+    monkeypatch.setattr(
+        runtime.store,
+        "add_subjective_entry",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("database unavailable")),
+    )
+
+    assert (
+        runtime.transform_llm_output(
+            "An unrecorded broadcast must not be delivered.",
+            session_id="cron_job-1_failure",
+            model="model-a",
+        )
+        == "[SILENT]"
+    )
+
+
 def test_non_agency_output_is_never_transformed(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     runtime = AgencyRuntime()

@@ -4,15 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-conscious-agency"
-version = "0.3.0"
-description = "Persistent self-model, intentions, reflection, and bounded proactive conversation for Hermes Agent"
+version = "0.4.0"
+description = "Persistent agency and an opt-in longitudinal subjectivity experiment for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.11"
-license = {file = "LICENSE"}
+license = "MIT"
 authors = [{name = "b7216309-jpg"}]
 classifiers = [
   "Development Status :: 3 - Alpha",
-  "License :: OSI Approved :: MIT License",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
   "Programming Language :: Python :: 3.12",

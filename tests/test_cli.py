@@ -36,3 +36,12 @@ def test_intention_cli_rejects_set_and_clear_together():
         assert exc.code == 2
     else:
         raise AssertionError("mutually exclusive deadline options were accepted")
+
+
+def test_subjective_journal_cli_filters_model_and_source():
+    args = _parser().parse_args(
+        ["subjective-journal", "--limit", "500", "--model", "model-a", "--source", "cron"]
+    )
+    assert args.limit == 500
+    assert args.model == "model-a"
+    assert args.source == "cron"

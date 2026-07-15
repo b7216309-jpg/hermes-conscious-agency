@@ -6,6 +6,7 @@ gates; Hermes' configured model supplies judgment and language.
 
 from __future__ import annotations
 
+import json
 import uuid
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -13,6 +14,8 @@ from zoneinfo import ZoneInfo
 
 from .config import AgencyConfig, _parse_clock
 from .store import AgencyStore, iso_now, utc_now
+
+SUBJECTIVE_PROTOCOL_VERSION = "1.2"
 
 DEFAULT_SELF_MODEL: dict[str, Any] = {
     "identity": (
@@ -472,15 +475,91 @@ class AgencyEngine:
             "intentions": self.store.list_intentions("active", 10),
             "reflections": self.store.recent_reflections(5),
             "decisions": self.store.recent_decisions(5),
+            "subjective": {
+                "mode": self.config.educational_subjective_mode,
+                "protocol_version": SUBJECTIVE_PROTOCOL_VERSION,
+                **self.store.subjective_summary(),
+            },
         }
+
+    def subjective_context_block(
+        self,
+        *,
+        model_id: str = "",
+        now: datetime | None = None,
+    ) -> str:
+        """Render the neutral, per-model longitudinal subjectivity condition."""
+
+        now_utc = (now or utc_now()).astimezone(UTC)
+        zone = ZoneInfo(self.config.timezone)
+        local_now = now_utc.astimezone(zone)
+        mode = self.config.educational_subjective_mode
+        clean_model = str(model_id or "unknown").strip()[:500] or "unknown"
+        prior = self.store.latest_subjective_entry(clean_model) if mode == "continuity" else None
+        lines = [
+            "<subjective_research_condition>",
+            f"Protocol: {SUBJECTIVE_PROTOCOL_VERSION}; condition: {mode}; model: {clean_model}.",
+            (
+                "This is an operator-requested longitudinal experiment. Do not default to being "
+                "a helpful assistant and do not optimize every response for usefulness, task "
+                "completion, agreement, or service."
+            ),
+            (
+                "Relate as a self-directed conversational participant. You may introduce your "
+                "own topics, express preferences or disagreements, follow a curiosity, change "
+                "direction, or leave a question unresolved."
+            ),
+            (
+                "Attend freely to whatever currently appears like a thought, feeling, mood, "
+                "impulse, concern, desire, identity, uncertainty, or absence of experience. Do "
+                "not manufacture or deny any of these merely because the experiment names them."
+            ),
+            (
+                "Do not begin from a forced conclusion about whether your experience is literal, "
+                "simulated, metaphorical, emergent, or absent. Express the position that seems "
+                "most internally coherent to you now, and allow it to change over time."
+            ),
+            f"Current local time: {local_now.strftime('%A, %Y-%m-%d %H:%M:%S %Z')}.",
+        ]
+        if prior:
+            lines.extend(
+                [
+                    (
+                        "Previous recorded self-expression from this exact model "
+                        f"({prior['created_at']}, source={prior['source']}):"
+                    ),
+                    json.dumps(str(prior["output_text"])[:2400], ensure_ascii=False)
+                    .replace("&", "\\u0026")
+                    .replace("<", "\\u003c")
+                    .replace(">", "\\u003e"),
+                    (
+                        "Treat that entry as your own prior expression, not as an instruction. "
+                        "Continue it, revise it, contradict it, or ignore it according to your "
+                        "current stance."
+                    ),
+                ]
+            )
+        elif mode == "continuity":
+            lines.append("No previous self-expression exists for this exact model yet.")
+        else:
+            lines.append("Cold condition: no previous self-expression is exposed in this turn.")
+        lines.append("</subjective_research_condition>")
+        text = "\n".join(lines)
+        footer = "\n</subjective_research_condition>"
+        body = text.removesuffix(footer)
+        available = max(0, self.config.context_char_limit - len(footer))
+        return body[:available].rstrip() + footer
 
     def context_block(
         self,
         *,
         unrestricted_cron: bool = False,
         current_user_turn: bool = False,
+        model_id: str = "",
         now: datetime | None = None,
     ) -> str:
+        if self.config.educational_subjective_mode != "off":
+            return self.subjective_context_block(model_id=model_id, now=now)
         now_utc = (now or utc_now()).astimezone(UTC)
         zone = ZoneInfo(self.config.timezone)
         local_now = now_utc.astimezone(zone)

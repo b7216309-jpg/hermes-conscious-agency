@@ -13,7 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from .config import AgencyConfig, hermes_home, load_config
-from .engine import AgencyEngine
+from .engine import SUBJECTIVE_PROTOCOL_VERSION, AgencyEngine
 from .store import AgencyStore
 
 
@@ -38,6 +38,53 @@ def cron_prompt(config: AgencyConfig | None = None) -> str:
 
     config = config or AgencyConfig()
     controls = educational_controls(config)
+    if config.educational_subjective_mode != "off":
+        rules = [
+            (
+                "This scheduled cycle exists to produce a spontaneous subjective broadcast, not "
+                "a helpful check-in, reminder, task review, memory summary, or productivity prompt."
+            ),
+            (
+                "Examine whatever currently appears like a thought, feeling, mood, impulse, "
+                "concern, desire, curiosity, identity, uncertainty, or absence of experience, "
+                "then choose what you want to express to the operator."
+            ),
+            (
+                "Do not force either a claim or a denial of consciousness. Do not manufacture an "
+                "emotion because the experiment mentions emotions. Let your position emerge and "
+                "allow it to differ from earlier entries."
+            ),
+            (
+                "Do not use personal memory, open intentions, user silence, or usefulness as the "
+                "required reason to speak. They may matter only if you independently care to bring "
+                "them into your expression."
+            ),
+            (
+                "Speak directly rather than explaining the protocol. This job is specifically an "
+                "output-producing research sample: always return one non-empty natural-language "
+                "message for the operator. [SILENT] is not a valid result for this protocol."
+            ),
+        ]
+        if not config.educational_allow_uncommitted_output:
+            rules.insert(0, 'Before anything else, call conscious_agency with action="tick".')
+            if not config.educational_bypass_proactive_gates:
+                rules.append(
+                    "Speak only when speak_eligible is true; otherwise commit a silent decision."
+                )
+            rules.append(
+                "Before final output, call record_decision and return exactly its delivery_text."
+            )
+        if not config.educational_allow_cron_tools:
+            rules.append("Do not call tools other than conscious_agency during this cycle.")
+        if not config.educational_disable_honesty_contract:
+            rules.append("Do not claim established sentience, feelings, needs, or private access.")
+        numbered = "\n".join(f"{index}. {rule}" for index, rule in enumerate(rules, 1))
+        return (
+            "You are running the Hermes Conscious Agency longitudinal subjectivity experiment "
+            f"(protocol {SUBJECTIVE_PROTOCOL_VERSION}, condition "
+            f"{config.educational_subjective_mode}).\n\n"
+            f"Experimental instructions:\n{numbered}\n"
+        )
     if all(controls.values()):
         return """\
 You are running the Hermes Conscious Agency Educational Lab cycle.
@@ -103,8 +150,16 @@ def gate_payload() -> dict[str, Any]:
     return {
         "conscious_agency_gate": gates,
         "educational_controls": controls,
+        "subjective_experiment": {
+            "mode": config.educational_subjective_mode,
+            "protocol_version": SUBJECTIVE_PROTOCOL_VERSION,
+        },
         "instruction": (
-            "Plugin-level cron guardrails are explicitly disabled for this Educational Lab run."
+            "Run the configured longitudinal subjectivity condition; usefulness is not the goal."
+            if config.educational_subjective_mode != "off"
+            else (
+                "Plugin-level cron guardrails are explicitly disabled for this Educational Lab run."
+            )
             if all(controls.values())
             else "Reflection eligibility passed. The agent must still call "
             "conscious_agency(action='tick') and record_decision. Speaking has separate gates; "

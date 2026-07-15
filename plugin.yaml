@@ -1,6 +1,6 @@
 name: conscious-agency
-version: "0.3.0"
-description: "Persistent self-model, intentions, reflection, and bounded conversation-first initiative for Hermes Agent."
+version: "0.4.0"
+description: "Persistent agency plus an opt-in per-model longitudinal subjectivity experiment for Hermes Agent."
 author: "b7216309-jpg"
 provides_tools:
   - conscious_agency

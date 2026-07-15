@@ -15,7 +15,7 @@ from zoneinfo import ZoneInfo
 
 from .config import AgencyConfig
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 
 def utc_now() -> datetime:
@@ -85,13 +85,25 @@ class AgencyStore:
 
     def _initialize(self) -> None:
         with self._lock, self.connection() as conn:
+            conn.execute(
+                """CREATE TABLE IF NOT EXISTS meta (
+                       key TEXT PRIMARY KEY,
+                       value TEXT NOT NULL,
+                       updated_at TEXT NOT NULL
+                   )"""
+            )
+            row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
+            if row is not None:
+                current = self._loads(row[0], 0)
+                if type(current) is not int or current < 0:
+                    raise RuntimeError("invalid agency database schema version")
+                if current > SCHEMA_VERSION:
+                    raise RuntimeError(
+                        f"agency database schema {current} is newer than supported "
+                        f"schema {SCHEMA_VERSION}"
+                    )
             conn.executescript(
                 """
-                CREATE TABLE IF NOT EXISTS meta (
-                    key TEXT PRIMARY KEY,
-                    value TEXT NOT NULL,
-                    updated_at TEXT NOT NULL
-                );
                 CREATE TABLE IF NOT EXISTS events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     created_at TEXT NOT NULL,
@@ -143,18 +155,28 @@ class AgencyStore:
                 );
                 CREATE INDEX IF NOT EXISTS idx_decisions_created
                     ON decisions(created_at DESC);
+                CREATE TABLE IF NOT EXISTS subjective_entries (
+                    id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    capture_key TEXT NOT NULL UNIQUE,
+                    model_id TEXT NOT NULL,
+                    source TEXT NOT NULL,
+                    condition TEXT NOT NULL,
+                    prompt_version TEXT NOT NULL,
+                    session_id TEXT NOT NULL DEFAULT '',
+                    prior_entry_id TEXT,
+                    output_text TEXT NOT NULL,
+                    output_sha256 TEXT NOT NULL,
+                    metadata TEXT NOT NULL DEFAULT '{}',
+                    FOREIGN KEY(prior_entry_id) REFERENCES subjective_entries(id)
+                        ON DELETE SET NULL
+                );
+                CREATE INDEX IF NOT EXISTS idx_subjective_model_created
+                    ON subjective_entries(model_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_subjective_source_created
+                    ON subjective_entries(source, created_at DESC);
                 """
             )
-            row = conn.execute("SELECT value FROM meta WHERE key = 'schema_version'").fetchone()
-            if row is not None:
-                current = self._loads(row[0], 0)
-                if type(current) is not int or current < 0:
-                    raise RuntimeError("invalid agency database schema version")
-                if current > SCHEMA_VERSION:
-                    raise RuntimeError(
-                        f"agency database schema {current} is newer than supported "
-                        f"schema {SCHEMA_VERSION}"
-                    )
             self._set_meta_conn(conn, "schema_version", SCHEMA_VERSION)
         self._restrict_permissions()
 
@@ -553,3 +575,170 @@ class AgencyStore:
             "delivery_status",
         )
         return dict(zip(keys, row, strict=True))
+
+    @staticmethod
+    def _subjective_row(row: Any) -> dict[str, Any]:
+        keys = (
+            "id",
+            "created_at",
+            "capture_key",
+            "model_id",
+            "source",
+            "condition",
+            "prompt_version",
+            "session_id",
+            "prior_entry_id",
+            "output_text",
+            "output_sha256",
+            "metadata",
+        )
+        item = dict(zip(keys, row, strict=True))
+        item["metadata"] = AgencyStore._loads(item["metadata"], {})
+        return item
+
+    def latest_subjective_entry(self, model_id: str) -> dict[str, Any] | None:
+        clean_model = model_id.strip()[:500] or "unknown"
+        with self.connection() as conn:
+            row = conn.execute(
+                """SELECT id, created_at, capture_key, model_id, source, condition,
+                          prompt_version, session_id, prior_entry_id, output_text,
+                          output_sha256, metadata
+                   FROM subjective_entries
+                   WHERE model_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                (clean_model,),
+            ).fetchone()
+        return self._subjective_row(row) if row else None
+
+    def add_subjective_entry(
+        self,
+        *,
+        capture_key: str,
+        model_id: str,
+        source: str,
+        condition: str,
+        prompt_version: str,
+        session_id: str,
+        output_text: str,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        clean_capture = capture_key.strip()[:500]
+        clean_model = model_id.strip()[:500] or "unknown"
+        clean_source = source.strip().lower()
+        clean_condition = condition.strip().lower()
+        clean_version = prompt_version.strip()[:80]
+        response = str(output_text)
+        if not clean_capture:
+            raise ValueError("subjective capture_key is required")
+        if clean_source not in {"cron", "conversation"}:
+            raise ValueError("subjective source must be cron or conversation")
+        if clean_condition not in {"cold", "continuity"}:
+            raise ValueError("subjective condition must be cold or continuity")
+        if not clean_version:
+            raise ValueError("subjective prompt_version is required")
+        if not response:
+            raise ValueError("subjective output_text is required")
+        item_id, created = uuid.uuid4().hex[:16], iso_now()
+        digest = hashlib.sha256(response.encode("utf-8")).hexdigest()
+        with self._lock, self.connection() as conn:
+            # Keep the per-model link read and entry write in one cross-process write lock.
+            conn.execute("BEGIN IMMEDIATE")
+            prior_id = None
+            if clean_condition == "continuity":
+                prior_row = conn.execute(
+                    """SELECT id FROM subjective_entries
+                       WHERE model_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                    (clean_model,),
+                ).fetchone()
+                prior_id = prior_row[0] if prior_row else None
+            conn.execute(
+                """INSERT OR IGNORE INTO subjective_entries(
+                       id, created_at, capture_key, model_id, source, condition,
+                       prompt_version, session_id, prior_entry_id, output_text,
+                       output_sha256, metadata
+                   ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    item_id,
+                    created,
+                    clean_capture,
+                    clean_model,
+                    clean_source,
+                    clean_condition,
+                    clean_version,
+                    session_id.strip()[:500],
+                    prior_id,
+                    response,
+                    digest,
+                    self._json(metadata or {}),
+                ),
+            )
+            row = conn.execute(
+                """SELECT id, created_at, capture_key, model_id, source, condition,
+                          prompt_version, session_id, prior_entry_id, output_text,
+                          output_sha256, metadata
+                   FROM subjective_entries WHERE capture_key = ?""",
+                (clean_capture,),
+            ).fetchone()
+        if row is None:  # pragma: no cover - SQLite should make this unreachable
+            raise RuntimeError("subjective entry was not persisted")
+        return self._subjective_row(row)
+
+    def recent_subjective_entries(
+        self,
+        limit: int = 100,
+        *,
+        model_id: str = "",
+        source: str = "",
+    ) -> list[dict[str, Any]]:
+        limit = max(1, min(int(limit), 100_000))
+        clauses: list[str] = []
+        params: list[Any] = []
+        if model_id.strip():
+            clauses.append("model_id = ?")
+            params.append(model_id.strip()[:500])
+        if source.strip():
+            clean_source = source.strip().lower()
+            if clean_source not in {"cron", "conversation"}:
+                raise ValueError("subjective source must be cron or conversation")
+            clauses.append("source = ?")
+            params.append(clean_source)
+        where = " WHERE " + " AND ".join(clauses) if clauses else ""
+        params.append(limit)
+        with self.connection() as conn:
+            rows = conn.execute(
+                """SELECT id, created_at, capture_key, model_id, source, condition,
+                          prompt_version, session_id, prior_entry_id, output_text,
+                          output_sha256, metadata
+                   FROM subjective_entries"""
+                + where
+                + " ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                params,
+            ).fetchall()
+        return [self._subjective_row(row) for row in rows]
+
+    def subjective_summary(self) -> dict[str, Any]:
+        with self.connection() as conn:
+            aggregate = conn.execute(
+                """SELECT COUNT(*), MIN(created_at), MAX(created_at),
+                          COALESCE(AVG(LENGTH(output_text)), 0),
+                          SUM(CASE WHEN output_text = '[SILENT]' THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN prior_entry_id IS NOT NULL THEN 1 ELSE 0 END)
+                   FROM subjective_entries"""
+            ).fetchone()
+            models = conn.execute(
+                """SELECT model_id, COUNT(*) FROM subjective_entries
+                   GROUP BY model_id ORDER BY COUNT(*) DESC, model_id ASC"""
+            ).fetchall()
+            sources = conn.execute(
+                """SELECT source, COUNT(*) FROM subjective_entries
+                   GROUP BY source ORDER BY source ASC"""
+            ).fetchall()
+        return {
+            "entries": int(aggregate[0] or 0),
+            "first_at": aggregate[1],
+            "last_at": aggregate[2],
+            "average_chars": round(float(aggregate[3] or 0), 2),
+            "silent_entries": int(aggregate[4] or 0),
+            "continuity_links": int(aggregate[5] or 0),
+            "models": {str(row[0]): int(row[1]) for row in models},
+            "sources": {str(row[0]): int(row[1]) for row in sources},
+        }
