@@ -8,6 +8,8 @@ All notable changes are documented here.
   normal conversation and scheduled reflection context.
 - Preserved the prior interaction before recording a new user turn, avoiding the misleading
   “just now” continuity signal on every request.
+- Merged new temporal defaults into existing 0.2 workspace/runtime JSON at startup while
+  preserving all legacy values.
 - Added absolute/relative timestamps for focus changes, unresolved questions, intentions,
   deadlines, self-observations, and recent reflections.
 - Exposed recent self-observations and reflections in normal compact context instead of keeping

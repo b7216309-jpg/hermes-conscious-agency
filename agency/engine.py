@@ -123,12 +123,15 @@ class AgencyEngine:
         self._ensure_defaults()
 
     def _ensure_defaults(self) -> None:
-        if self.store.get_meta("self_model") is None:
-            self.store.set_meta("self_model", DEFAULT_SELF_MODEL)
-        if self.store.get_meta("workspace") is None:
-            self.store.set_meta("workspace", DEFAULT_WORKSPACE)
-        if self.store.get_meta("runtime") is None:
-            self.store.set_meta("runtime", DEFAULT_RUNTIME)
+        for key, defaults in (
+            ("self_model", DEFAULT_SELF_MODEL),
+            ("workspace", DEFAULT_WORKSPACE),
+            ("runtime", DEFAULT_RUNTIME),
+        ):
+            existing = self.store.get_meta(key)
+            merged = {**defaults, **existing} if isinstance(existing, dict) else dict(defaults)
+            if existing != merged:
+                self.store.set_meta(key, merged)
 
     def self_model(self) -> dict[str, Any]:
         value = self.store.get_meta("self_model", DEFAULT_SELF_MODEL)

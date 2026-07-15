@@ -16,6 +16,27 @@ def test_tick_needs_authorized_attention(config):
     assert "nothing_authorized_for_proactive_attention" in tick["blocked_by"]
 
 
+def test_startup_merges_temporal_defaults_into_legacy_state(config):
+    store = AgencyStore(config)
+    store.set_meta("workspace", {"focus": "Preserve legacy focus", "questions": []})
+    store.set_meta(
+        "runtime",
+        {
+            "paused": False,
+            "last_user_interaction": "2026-07-14T08:00:00+00:00",
+            "last_session_id": "legacy-session",
+        },
+    )
+
+    engine = AgencyEngine(store, config)
+
+    assert engine.workspace()["focus"] == "Preserve legacy focus"
+    assert engine.workspace()["focus_updated_at"] is None
+    assert engine.runtime()["last_session_id"] == "legacy-session"
+    assert engine.runtime()["previous_user_interaction"] is None
+    assert engine.runtime()["previous_session_id"] == ""
+
+
 def test_reflection_and_speaking_have_independent_gates(config_factory):
     config = config_factory(allow_proactive_messages=False, allow_scheduled_reflection=True)
     engine = AgencyEngine(AgencyStore(config), config)
