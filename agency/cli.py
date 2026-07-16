@@ -8,8 +8,8 @@ import shlex
 from typing import Any
 
 from .config import load_config
-from .cron import cron_action, install_cron
 from .engine import AgencyEngine
+from .heartbeat import heartbeat_status, remove_legacy_cron, request_heartbeat_wake
 from .store import AgencyStore
 
 
@@ -34,7 +34,7 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     )
     journal.add_argument("--limit", type=int, default=100)
     journal.add_argument("--model", default="")
-    journal.add_argument("--source", choices=["cron", "conversation"], default="")
+    journal.add_argument("--source", choices=["heartbeat", "conversation", "cron"], default="")
     pause = subs.add_parser("pause", help="Pause agency behavior")
     pause.add_argument("reason", nargs="*", default=[])
     subs.add_parser("resume", help="Resume agency behavior (operator-only)")
@@ -57,9 +57,12 @@ def register_cli(parser: argparse.ArgumentParser) -> None:
     due_group.add_argument("--clear-due", action="store_true", help="Clear the current deadline")
     tick = subs.add_parser("tick", help="Evaluate hard proactive gates without sending")
     tick.add_argument("--record-silent", action="store_true")
-    subs.add_parser("install-cron", help="Install the bounded proactive cron job")
-    for action in ("pause-cron", "resume-cron", "run-cron", "remove-cron"):
-        subs.add_parser(action)
+    subs.add_parser("heartbeat-status", help="Show native heartbeat scheduler status")
+    subs.add_parser("run-heartbeat", help="Request an immediate native heartbeat")
+    subs.add_parser(
+        "migrate-heartbeat",
+        help="Remove the recorded legacy Agency cron after upgrading",
+    )
     parser.set_defaults(func=cli_command)
 
 
@@ -69,7 +72,8 @@ def cli_command(args: argparse.Namespace) -> int:
         print("Usage: hermes conscious-agency <action>")
         print(
             "Actions: status, snapshot, events, subjective-journal, pause, resume, focus, "
-            "intentions, add-intention, update-intention, tick, install-cron"
+            "intentions, add-intention, update-intention, tick, heartbeat-status, "
+            "run-heartbeat, migrate-heartbeat"
         )
         return 2
     try:
@@ -81,6 +85,7 @@ def cli_command(args: argparse.Namespace) -> int:
                     "runtime": engine.runtime(),
                     "focus": engine.workspace().get("focus"),
                     "gates": engine.evaluate_tick(),
+                    "heartbeat": heartbeat_status(engine.store),
                     "subjective": engine.snapshot()["subjective"],
                 }
             )
@@ -123,11 +128,12 @@ def cli_command(args: argparse.Namespace) -> int:
             _print(gates)
             if args.record_silent:
                 engine.record_decision("silent", "Manual operator gate inspection")
-        elif action == "install-cron":
-            _print(install_cron())
-        elif action.endswith("-cron"):
-            verb = action.removesuffix("-cron")
-            print(cron_action(verb))
+        elif action == "heartbeat-status":
+            _print(heartbeat_status(engine.store))
+        elif action == "run-heartbeat":
+            _print({"request_id": request_heartbeat_wake("manual", "operator CLI")})
+        elif action == "migrate-heartbeat":
+            _print(remove_legacy_cron())
         return 0
     except Exception as exc:
         print(f"conscious-agency: {type(exc).__name__}: {exc}")
@@ -141,6 +147,8 @@ SLASH_HELP = """/agency commands:
   pause [reason]
   resume
   tick
+  heartbeat
+  wake
 """
 
 
@@ -160,6 +168,7 @@ def slash_command(raw_args: str) -> str:
                 "runtime": engine.runtime(),
                 "focus": engine.workspace().get("focus"),
                 "gates": engine.evaluate_tick(),
+                "heartbeat": heartbeat_status(engine.store),
                 "subjective": engine.snapshot()["subjective"],
             },
             indent=2,
@@ -177,4 +186,12 @@ def slash_command(raw_args: str) -> str:
         return json.dumps(engine.resume_by_user(), indent=2, ensure_ascii=False)
     if action == "tick":
         return json.dumps(engine.evaluate_tick(), indent=2, ensure_ascii=False)
+    if action == "heartbeat":
+        return json.dumps(heartbeat_status(engine.store), indent=2, ensure_ascii=False)
+    if action == "wake":
+        return json.dumps(
+            {"request_id": request_heartbeat_wake("manual", "user slash command")},
+            indent=2,
+            ensure_ascii=False,
+        )
     return f"Unknown agency command: {action}\n\n{SLASH_HELP}"

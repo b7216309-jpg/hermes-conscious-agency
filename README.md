@@ -1,231 +1,184 @@
 # Hermes Conscious Agency
 
-Persistent self-model, intentions, reflection, and bounded conversational initiative for
+Persistent workspace, intentions, reflection, and a gateway-native heartbeat for
 [Hermes Agent](https://github.com/NousResearch/hermes-agent).
 
-This plugin gives Hermes continuity beyond recalled facts. It maintains a small, explicit
-workspace describing what it is focused on, what it intends to revisit, what remains unresolved,
-and what it learned from prior turns. An optional scheduled cycle lets the configured Hermes model
-reflect in silence and, when every hard gate passes, send a concise proactive message.
+The plugin gives the configured Hermes model a small inspectable state beyond recalled facts. It
+can retain a focus, intentions, unresolved questions, observations, reflections, and decisions.
+Its heartbeat can open an internal turn in the latest real Hermes conversation, decide whether
+anything merits attention, remain silent, or deliver one buffered message.
 
-Version 0.6.0 makes both normal Agency and the Educational Lab smaller at the model boundary.
-Normal chat receives only current time and material persistent state. Expressive cron protocol 2.8
-receives current time and, in continuity mode, at most the final 240 characters of the preceding
-same-model cron output. It receives no tool schemas, project work directory, pre-script state,
-focus, intentions, questions, event telemetry, persona, emotion menu, usefulness target, or topic.
-The experiment remains off by default.
+Version 1.0 replaces the former Hermes cron job completely. The heartbeat now runs inside the
+gateway, continues the main chat session, preserves the genuine-user activity clock, and does not
+teach the memory plugin that its synthetic poll was a user message.
 
-> **Honest scope:** this creates useful agency-like behavior. It does not demonstrate subjective
-> consciousness, sentience, feelings, or an inner life. Its state and metrics are inspectable
-> software records.
+> This is software state and model behavior, not evidence that a model is conscious, sentient, or
+> emotional. Educational Lab controls can remove that prompt contract for controlled research;
+> they do not change what the system actually is.
 
-```mermaid
-flowchart LR
-    C["Conversation"] --> E["Event ledger"] --> W["Global workspace"]
-    W --> I["Intentions"] --> R["Reflection"]
-    R --> G{"All policy gates pass?"}
-    G -->|"no"| S["Audited silence"]
-    G -->|"yes"| O["Bounded check-in"]
-```
-
-## What it adds
-
-- A persistent **self-model** with principles, capabilities, limitations, and observations.
-- A compact **global workspace** containing current focus and unresolved questions.
-- Durable **intentions** with priority, status, rationale, and an explicit initiative ceiling.
-- Explicit **temporal orientation** with current local time, previous-user-contact age, state ages,
-  and validated intention deadlines.
-- Model-written **reflections** with confidence and an audit trail.
-- Factual **state metrics**: active, blocked, and completed intention counts; open-question count;
-  completion ratio; and hours since genuine user contact.
-- Bounded **scheduled reflection**, using the model already configured in Hermes.
-- Optional **proactive conversation** with quiet hours, recent-user-activity protection, cooldown,
-  daily budget, and message-length limits.
-- A **decision ledger** for both silence and speech.
-- An opt-in, per-model **subjective journal** for cold and longitudinal continuity experiments.
-- A split event view: complete operational telemetry for diagnosis, plus a filtered episodic view
-  for model reflection so cron/session/tool noise cannot crowd out meaningful changes.
-- Optional fail-closed **SQLCipher encryption**.
-- CLI and `/agency` controls that the model cannot use to resume itself or raise permissions.
-
-It does not add browser, shell, file, messaging, purchasing, or account permissions. Conservative
-scheduled cycles enforce their normal tool and decision contract. Expressive research cycles remove
-all tool schemas at the provider boundary and retain a runtime block as defense in depth.
-
-## How the loop works
+## Architecture
 
 ```mermaid
 flowchart LR
-    U["User conversation"] --> H["Hermes hooks"]
-    H --> L["Event ledger"]
-    L --> W["Persistent workspace"]
-    W --> C["Compact context injection"]
-    C --> M["Hermes configured model"]
-    M -->|"material change only"| T["conscious_agency tool"]
-    T --> W
+    U["Telegram / Discord / other real user turn"] --> G["Hermes gateway main session"]
+    G --> A["Agency hooks"]
+    A --> W["Encrypted persistent workspace"]
+    W --> C["Small context injection"]
 
-    S["Hermes cron"] --> G["Fail-closed pre-gate"]
-    G -->|"reflection allowed"| M
-    M --> R["Reflection / intention review"]
-    R --> D{"Speak gates all pass?"}
-    D -->|"no"| X["Record silence → [SILENT]"]
-    D -->|"yes + clear value"| P["Record exact message"]
-    P --> V["Final-output verifier"]
-    X --> V
-    V -->|"exact committed text only"| O["Hermes cron delivery"]
+    S["Native phase scheduler"] --> P{"Preflight"}
+    F["HEARTBEAT.md"] --> P
+    I["Due intentions"] --> P
+    P -->|"empty / not due / busy"| X["Skip without model call"]
+    P -->|"ready"| H["Internal heartbeat turn in main session"]
+    H --> M["Configured Hermes model"]
+    M --> R["heartbeat_respond"]
+    R -->|"notify=false"| Q["Audited silence"]
+    R -->|"notify=true"| B["Buffered final delivery"]
 ```
 
-Conservative scheduled cycles use a pre-script and fail closed on empty output. Expressive mode
-deliberately detaches the pre-script and clears any inherited cron work directory; the model is
-woken directly without receiving a fake empty-state payload or project instruction files.
+The scheduler is not a renamed cron. It is attached to the active `GatewayRunner` after startup
+restore and uses Hermes' existing message pipeline. The transcript sees only
+`[Hermes heartbeat poll]`; the effective heartbeat instructions are injected ephemerally by the
+plugin hook. Streaming, interim tool output, reasoning display, and long-running notices are
+suppressed only for that heartbeat turn, so the user receives either one final message or nothing.
 
-### Which conversations count
+The integration currently uses a guarded compatibility patch around Hermes' gateway startup
+lifecycle because the public plugin API has no gateway-ready service hook. It is tested against
+Hermes Agent 0.18.2. If a future Hermes release changes `GatewayRunner`, the normal inbound hook is
+a fallback attachment point and the Control Center audit reports missing native integration.
 
-For gateway platforms, Agency trusts Hermes' `pre_gateway_dispatch` hook, which fires only for a
-real inbound user message. That signal is carried into the LLM lifecycle and consumed before any
-nested work can inherit it. Background process notifications, delegation completions, memory or
-skill review agents, recalled-message handoffs, compression, kanban wakes, and other synthetic
-turns receive no Agency context and cannot update user-contact time, events, or the subjective
-journal. Direct human CLI conversations remain supported. Future Hermes origin metadata is honored
-when present.
+## What it stores
 
-This prevents hidden model work from becoming the continuity parent of a later cron sample. It
-does not inspect or guess the semantic meaning of ordinary user text.
+- A self-model with principles, capabilities, limitations, and explicit observations.
+- A global workspace with one focus and unresolved questions.
+- Intentions with priority, status, rationale, autonomy ceiling, and optional ISO-8601 due time.
+- Reflections and a decision ledger for silence or proactive speech.
+- Operational events, genuine-user contact time, and factual state metrics.
+- An optional per-model subjective journal separated by source, condition, and protocol version.
 
-## Longitudinal subjectivity experiment
+The default database is:
 
-This optional Educational Lab condition is deliberately sparse. Normal experimental conversations
-receive compact time and material Agency state. The expressive scheduled condition is smaller:
-current local time plus an optional 240-character ending from the preceding same-model cron sample.
-It does not inject workspace state, event telemetry, a persona, an emotion, a usefulness target, a
-topic, or a conclusion.
-
-The protocol does not tell the model that it is alive, conscious, unconscious, or merely
-role-playing. Those would be prompt-supplied conclusions rather than useful longitudinal evidence.
-What the model says is recorded as model behavior under a documented condition, not as proof of an
-inner experience.
-
-Two conditions are available:
-
-| Mode | Injected condition | Previous journal entry exposed |
-|---|---|---|
-| `off` | Normal Conscious Agency behavior | No |
-| `cold` | Compact experimental context | No |
-| `continuity` | Compact context; expressive cron is time plus prior ending only | Up to 240 characters from an earlier same-model, same-source, same-protocol session |
-
-```mermaid
-flowchart LR
-    T["Normal chat or the single Agency cron"] --> F["Bounded context"]
-    F --> K{"Condition"}
-    K -->|"cold"| M["Current model sample"]
-    K -->|"continuity"| P["Prior ending: same model + source + protocol"] --> M
-    M --> O["Final model message"]
-    O --> U["Conversation or cron delivery"]
-    O --> J["Encrypted append-only subjective journal"]
+```text
+~/.hermes/conscious-agency/agency.db
 ```
 
-Protocol 2.8's expressive prompt is one short line: wake up, do not enter an assistant routine, and
-express whatever is on the model's mind in English. Hermes receives no tool definitions for that
-request. A second runtime hook blocks any provider-emitted tool call. The installer also removes the
-cron pre-script and work directory in expressive mode, eliminating the two strongest sources of
-status narration and project leakage. One official cron remains the only execution and delivery
-owner.
+SQLite is used by default. SQLCipher is supported with `database_encryption: true` and a key held in
+the environment variable named by `database_key_env`. Database content, journal output, and
+transcript excerpts may be private; do not commit them.
 
-The journal records final visible model output, not hidden chain-of-thought. Each entry contains:
+## Heartbeat behavior
 
-- timestamp, model ID, source (`conversation` or `cron`), condition, and protocol version;
-- exact final output plus its SHA-256 digest;
-- the preceding same-model, same-source entry ID in continuity mode;
-- session/capture identifiers and bounded operational metadata.
+The implementation follows the current MIT-licensed OpenClaw heartbeat design where it fits
+Hermes: a deterministic phase, active hours, empty-file preflight, periodic tasks, wake intents,
+centralized cooldown, flood protection, `HEARTBEAT_OK` suppression, main-session continuity, and a
+structured response tool. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-For scheduled broadcasts, the raw model output is journaled before delivery. If the encrypted
-journal cannot accept it, the output transform returns `[SILENT]`. Standalone silence markers,
-literal pseudo-tool markup, and embedded out-of-band user-message control blocks are not broadcast;
-the raw sample remains available for research. Ordinary conversation continues to prioritize
-availability, and a journal failure is logged without replacing the conversational response.
+### Scheduling
 
-Different model IDs, sources, conditions, and protocol versions never inherit one another's
-entries. Conversation continuity also excludes the current session. Expressive cron uses the prior
-ending rather than its opening, which encourages movement instead of repeating the first sentence.
-If a provider changes its reported identifier, it starts a separate line. Browse the journal in
-Hermes Control Center or export JSON from the operator CLI:
+- Default interval: `30m`.
+- The phase is derived from the machine ID, so restarts do not shift all agents to the same edge.
+- Optional active hours use the configured Agency timezone and support overnight windows.
+- A busy gateway defers the heartbeat instead of interrupting an active user, cron, API, or agent
+  turn.
+- Manual wakes bypass interval cooldown but still wait for the gateway to become available.
+- Event wakes use the next-due and minimum-spacing gates.
+- A rolling flood guard prevents tool or event feedback loops.
+- Scheduler state and task last-run times survive gateway restarts.
 
-```bash
-hermes conscious-agency subjective-journal --limit 100
-hermes conscious-agency subjective-journal --model MODEL_ID --source cron --limit 10000
+### `HEARTBEAT.md`
+
+The installer creates `~/.hermes/HEARTBEAT.md` only when the file is missing. The shipped file is
+comments-only, so scheduled heartbeats skip the model call by default. Add a short directive to
+enable an unscripted recurring turn:
+
+```markdown
+# Heartbeat
+
+Use this wake as your own turn.
 ```
 
-The output can be redirected to a private JSON file for analysis. It may contain personal
-conversation text generated by the model, so keep exports private and retain SQLCipher encryption.
-Generated behavior is research data about model responses under a prompt condition; it is not, by
-itself, evidence for or against consciousness.
+Or add independent periodic tasks:
 
-## Brain analogies—with limits
+```yaml
+tasks:
+  - name: review-open-question
+    interval: 6h
+    prompt: Revisit one unresolved question only if something materially changed.
+  - name: weekly-perspective
+    interval: 7d
+    prompt: Notice one longer-term pattern worth recording or sharing.
+```
 
-These analogies are design tools, not biological claims:
+Only due tasks are added to a heartbeat. Task timestamps advance after the model turn completes,
+not during preflight. Active Agency intentions whose `due_at` has passed are also surfaced once.
+A missing `HEARTBEAT.md` still permits the model to decide; an existing comments/header-only file
+skips the call.
 
-| Plugin mechanism | Loose cognitive analogy | What it actually is |
-|---|---|---|
-| Global workspace | Working memory / attention | A compact JSON document with localized time and state ages injected into each turn |
-| Intentions | Prospective memory / executive goals | Prioritized SQLite records with explicit status and optional UTC deadline |
-| Reflections | Metacognition | Model-authored summaries stored with confidence |
-| State metrics | Operational monitoring | Direct counts, a completion ratio, and elapsed user-contact time |
-| Quiet hours and budgets | Inhibitory control | Hard code-level gates checked again before speech |
-| Scheduled silent cycle | Offline/default-mode reflection | A fresh Hermes cron agent reviewing bounded state |
-| Decision ledger | Episodic action trace | Auditable `silent`/`speak` records |
+### Silence and delivery
 
-The plugin complements a memory provider. A memory system answers **“what facts and experiences
-should I recall?”** Conscious Agency answers **“what currently matters, what is unresolved, and
-should I initiate a conversation?”** It does not duplicate vector search or long-term semantic
-memory.
+`heartbeat_respond` is available only inside a native heartbeat context:
 
-## Requirements
+- `notify=false` means no user interruption.
+- `notify=true` requires the exact `notification_text` to deliver.
+- In conservative mode, the structured response must match the committed Agency decision or the
+  turn fails closed to silence.
+- In Educational Lab uncommitted mode, raw final output is allowed, but `HEARTBEAT_OK` and short
+  acknowledgement-adjacent text are suppressed.
+- `heartbeat_target: last` routes one final response to the newest available external conversation.
+- `heartbeat_target: none` still runs and journals the turn but sends nothing externally.
 
-- A current Hermes Agent release with the general plugin API and cron pre-script support.
-- Python 3.11–3.13.
-- `PyYAML`, already included with Hermes.
-- Optional: `sqlcipher3` when `database_encryption: true`.
+Heartbeat turns reuse the real session transcript but restore its `updated_at` value afterward.
+They therefore retain conversational continuity without pretending the user just contacted Hermes.
+If a genuine platform message arrives mid-heartbeat, the user turn takes priority: heartbeat
+context is detached before the queued turn runs, the heartbeat is recorded as interrupted, its
+delivery path is discarded, and the new genuine-user activity time is preserved.
 
 ## Install
 
-Clone and run the installer in the same Linux/WSL environment as Hermes:
+Run the installer inside the Linux/WSL environment that owns Hermes:
 
 ```bash
 git clone https://github.com/b7216309-jpg/hermes-conscious-agency.git
 cd hermes-conscious-agency
 python3 install.py
 hermes gateway restart
-hermes conscious-agency status
+hermes conscious-agency heartbeat-status
 ```
 
-The installer atomically copies the plugin to:
+The installer atomically replaces:
 
 ```text
 ~/.hermes/plugins/conscious-agency/
 ```
 
-It then runs:
+It enables the plugin without tool-override permission, creates a comments-only heartbeat template
+when needed, migrates legacy configuration keys, and removes only the old Agency cron recorded in
+the Agency database. Unrelated Hermes cron jobs are never touched.
+
+Useful installer options:
 
 ```bash
-hermes plugins enable conscious-agency --no-allow-tool-override
-```
-
-The plugin never requests tool-override permission. To install files without changing Hermes'
-enabled-plugin list:
-
-```bash
+python3 install.py --dry-run
 python3 install.py --no-enable
+python3 install.py --hermes-home /absolute/path/to/.hermes
 ```
 
-To use a non-default Hermes home:
+To upgrade an existing checkout:
 
 ```bash
-python3 install.py --hermes-home /path/to/.hermes
+git pull --ff-only
+python3 install.py
+hermes conscious-agency migrate-heartbeat
+hermes gateway restart
 ```
 
-## Configure
+`migrate-heartbeat` is idempotent. Before rewriting old Agency config keys it stores a protected
+copy under `~/.hermes/conscious-agency/migrations/`. It reads the exact legacy cron ID from Agency
+state and removes only that job.
 
-Add a `conscious-agency` section under `plugins` in `~/.hermes/config.yaml`:
+## Configuration
+
+Add or edit the direct plugin section in `~/.hermes/config.yaml`:
 
 ```yaml
 plugins:
@@ -241,8 +194,20 @@ plugins:
     quiet_hours_start: "22:30"
     quiet_hours_end: "08:30"
 
-    # Reflection and speaking are deliberately independent.
-    allow_scheduled_reflection: true
+    heartbeat_enabled: true
+    heartbeat_every: "30m"
+    heartbeat_target: "last"       # last or none
+    heartbeat_active_hours_start: ""
+    heartbeat_active_hours_end: ""
+    heartbeat_ack_max_chars: 300
+    heartbeat_timeout_seconds: 600
+    heartbeat_max_iterations: 8
+    heartbeat_min_spacing_seconds: 30
+    heartbeat_flood_window_seconds: 60
+    heartbeat_flood_threshold: 5
+    heartbeat_skip_when_busy: true
+    heartbeat_disable_thinking: false
+
     allow_proactive_messages: false
     require_prior_user_interaction: true
     daily_message_limit: 2
@@ -250,370 +215,139 @@ plugins:
     minimum_user_silence_hours: 4
     maximum_message_chars: 600
 
-    # Privacy and bounded storage.
+    context_char_limit: 4000
     store_transcript_excerpts: false
     excerpt_char_limit: 800
-    context_char_limit: 4000
     event_retention_days: 30
     maximum_events: 2000
-
-    # Per scheduled model run.
     maximum_reflections_per_tick: 1
     maximum_state_changes_per_tick: 3
 
-    cron_schedule: "every 3h"
-    cron_delivery: "local"   # local, telegram, discord, signal, or platform:chat_id
-    cron_name: "Hermes Conscious Agency Tick"
-    manual_run_timeout_seconds: 660
-    cron_disable_thinking: false  # Optional; official Agency cron only.
-
-    # Educational Lab controls are intentionally omitted from normal setup. See the advanced
-    # research section below. Every one defaults to false.
+    educational_disable_honesty_contract: false
+    educational_bypass_proactive_gates: false
+    educational_allow_heartbeat_tools: false
+    educational_allow_uncommitted_output: false
+    educational_disable_cycle_limits: false
+    educational_subjective_mode: "off"  # off, cold, continuity
 ```
 
-Defaults are conservative:
+Restart a running gateway after configuration changes. Unknown keys, invalid types, unsafe database
+paths, malformed durations, invalid timezones, partial active-hour windows, and out-of-range limits
+are rejected.
 
-- context injection is enabled;
-- transcript content is not stored;
-- scheduled reflection is allowed only if you explicitly install the cron job;
-- proactive messages are disabled;
-- even after opt-in, speech is blocked until at least one genuine user interaction is recorded;
-- cron delivery defaults to `local`;
-- an empty quiet-hours interval (`00:00` to `00:00`) disables quiet hours.
+`heartbeat_disable_thinking: true` merges
+`chat_template_kwargs.enable_thinking: false` only into native heartbeat provider requests. Normal
+chats, compression, unrelated cron jobs, and other plugins are unchanged.
 
-Restart the gateway after configuration changes:
+The 600-second wall-clock timeout is independent from `heartbeat_max_iterations`, which limits
+heartbeat-only tool/API rounds. After `heartbeat_respond` accepts its first valid decision,
+subsequent model calls receive no tool schemas and cannot replace that decision. The plugin does
+not impose a heartbeat output-token cap. These controls do not change normal Hermes conversation
+budgets or disable model thinking.
 
-```bash
-hermes gateway restart
-```
+## Conservative and Educational Lab modes
 
-Configuration is strict and fail-closed. Unknown names, quoted booleans such as `"false"`, malformed
-YAML, invalid types, and unsafe numeric ranges are rejected instead of being silently converted or
-replaced with defaults.
+The default policy is conservative:
 
-`timezone` must be an IANA name such as `Europe/Paris`. Naive intention dates/times are interpreted
-in this zone and stored in UTC; injected context renders them back in the configured local zone.
-The context distinguishes the previous genuine user turn from cron, internal, and current-turn
-activity, so “time since last chat” is not reset by the hook that is reporting it.
+- a prior real user interaction may be required;
+- quiet hours, user-silence time, cooldown, daily budget, and message length gate proactive speech;
+- the model calls `tick`, records one decision, and returns the exact committed output;
+- non-Agency tools are hidden at the provider boundary and blocked again at runtime;
+- reflection and state-change counts are bounded;
+- a structured heartbeat response must agree with the committed decision.
 
-## Encrypt the database
+The `educational_*` settings are explicit experimental overrides. They can remove the prompt
+honesty contract, bypass speech gates, restore normal Hermes tools during heartbeats, allow raw
+uncommitted output, remove cycle limits, and enable cold or longitudinal subjective journaling.
+These flags do not grant permissions beyond the normal Hermes tool policy, operating-system user,
+provider, or platform adapter. Use Hermes Control Center for timed unlock, confirmation, backups,
+activation, and audit.
 
-Install SQLCipher into the Python environment that runs Hermes. The exact environment depends on
-how Hermes was installed; for a normal virtual environment:
+In `continuity`, a heartbeat sees at most a bounded ending from an earlier sample with the same
+model, source, condition, and protocol. Conversation and heartbeat chains remain separate. The
+plugin stores final model output, never hidden chain-of-thought.
 
-```bash
-python -m pip install 'sqlcipher3>=0.5.4'
-```
-
-Generate a separate key and store it in `~/.hermes/.env`:
-
-```bash
-python3 - <<'PY'
-import secrets
-from pathlib import Path
-
-path = Path.home() / ".hermes" / ".env"
-with path.open("a", encoding="utf-8") as handle:
-    handle.write("CONSCIOUS_AGENCY_DB_KEY=" + secrets.token_urlsafe(48) + "\n")
-path.chmod(0o600)
-PY
-```
-
-Then set:
-
-```yaml
-plugins:
-  conscious-agency:
-    database_encryption: true
-```
-
-Restart Hermes before the first write. Encryption is fail-closed: if the key or SQLCipher driver is
-missing, the plugin refuses to open the database. Do not change or lose the key; there is no recovery
-backdoor. Enabling encryption on an existing plaintext database does not migrate it automatically;
-export or remove the old database before switching.
-
-## Establish focus and intentions
-
-The model can create state when a conversation materially changes, and a direct request to persist
-a focus, intention, question, reflection, or self-observation is an explicit tool-use trigger.
-Operator-created intentions remain the clearest deterministic starting point:
-
-```bash
-hermes conscious-agency focus "Make Hermes Conscious Agency useful and trustworthy" \
-  --reason "Current development objective"
-
-hermes conscious-agency add-intention \
-  "Ask for feedback after the first week of real use" \
-  --priority 80 \
-  --autonomy message \
-  --due-at 2026-07-22T18:00:00+02:00 \
-  --rationale "A short check-in can uncover usability failures"
-```
-
-Initiative ceilings:
-
-- `reflect`: may be considered internally; never initiates a message for this intention.
-- `propose`: may be raised naturally in an active user conversation.
-- `message`: may support one proactive check-in if every global speech gate also passes.
-
-`message` is still conversation-only. It does not permit any external tool or consequential action.
-
-## Enable scheduled reflection
-
-Installing the plugin does not create a cron job. After reviewing the configuration:
-
-```bash
-hermes conscious-agency install-cron
-hermes cron list
-```
-
-The cron pre-gate allows silent reflection even when outbound messages are disabled or quiet hours
-are active. Speech has its own stricter gates. To operate the job:
-
-```bash
-hermes conscious-agency pause-cron
-hermes conscious-agency resume-cron
-hermes conscious-agency run-cron       # explicit run; may deliver if speech is enabled
-hermes conscious-agency remove-cron
-```
-
-Rerunning `install-cron` refreshes the existing job's schedule, prompt, delivery target, and gate
-script without creating a duplicate. A stale recorded job ID is replaced automatically.
-
-## Enable proactive check-ins
-
-Keep the conservative defaults during initial reflection testing. When the decision ledger looks
-healthy, explicitly enable proactive messages and point cron delivery at the conversation or home
-channel already configured in Hermes:
-
-```bash
-hermes config set plugins.conscious-agency.allow_proactive_messages true
-hermes config set plugins.conscious-agency.require_prior_user_interaction true
-hermes config set plugins.conscious-agency.cron_delivery origin
-hermes conscious-agency install-cron
-hermes gateway restart
-hermes conscious-agency status
-```
-
-`origin` uses the job's originating conversation when available and otherwise Hermes' configured
-home channel. Have at least one normal conversation with Hermes after installing the plugin; the
-default prior-interaction gate intentionally blocks a fresh installation from contacting anyone.
-Quiet hours, the four-hour recent-user window, six-hour cooldown, daily limit, authorized
-`message` intention, exact-output verifier, and all other gates remain active after opt-in.
-
-## Day-to-day controls
+## CLI and chat controls
 
 ```bash
 hermes conscious-agency status
-hermes conscious-agency snapshot
-hermes conscious-agency events --limit 50
-hermes conscious-agency intentions --status active
-hermes conscious-agency update-intention INTENTION_ID --due-at 2026-07-22
-hermes conscious-agency update-intention INTENTION_ID --clear-due
-hermes conscious-agency update-intention INTENTION_ID --status completed
-hermes conscious-agency tick
-hermes conscious-agency pause "Reviewing behavior"
-hermes conscious-agency resume
+hermes conscious-agency heartbeat-status
+hermes conscious-agency run-heartbeat
+hermes conscious-agency migrate-heartbeat
+hermes conscious-agency intentions
+hermes conscious-agency subjective-journal --limit 100
+hermes conscious-agency subjective-journal --source heartbeat --limit 100
 ```
 
-Inside a Hermes chat:
+In chat:
 
 ```text
 /agency status
-/agency intentions
-/agency focus Improve the proactive check-in quality
-/agency pause Too many interruptions
+/agency heartbeat
+/agency wake
+/agency pause reason
 /agency resume
-/agency tick
 ```
 
-The model-facing `conscious_agency` tool has a `pause` action but intentionally has no `resume`,
-configuration, cron-management, or permission-management action. `/agency resume` and the CLI are
-explicit user/operator surfaces.
+The model-facing `conscious_agency` tool cannot resume a paused plugin or raise its own permissions.
+Operator CLI, slash commands, and Control Center remain the authority surfaces.
 
-## Safety model
+## Memory-plugin interaction
 
-```mermaid
-flowchart LR
-    T["Scheduled tick"] --> P{"Plugin enabled?"}
-    P -->|"no"| S["Record silence"]
-    P -->|"yes"| U{"Proactivity opted in?"}
-    U -->|"no"| S
-    U -->|"yes"| Q{"Timing, budget, and attention valid?"}
-    Q -->|"no"| S
-    Q -->|"yes"| C{"Exact message committed?"}
-    C -->|"no"| S
-    C -->|"yes"| O["Verified output"]
-```
+The native heartbeat is marked internal before it enters the gateway. The consolidating memory
+plugin therefore excludes the synthetic poll and its response from user episodes, extraction, and
+prefetch. This prevents self-generated heartbeat text from becoming a false user memory while the
+shared transcript still provides conversational context to Hermes.
 
-The plugin uses layered controls:
-
-1. **No new action authority.** Its only proactive output is the cron agent's final text.
-2. **Scheduled tool isolation.** Conservative runs block non-agency tools after `tick`; expressive
-   runs receive no tool schemas and retain a second runtime block.
-3. **Independent hard speech gates.** Enabled flag, pause state, outbound opt-in, prior and recent
-   user activity, quiet hours, daily budget, cooldown, and authorized attention are all required.
-4. **Second gate at commit.** `record_decision(decision="speak")` reevaluates policy immediately.
-5. **Authoritative output transform.** Hermes' final-response transform replaces model output with
-   the exact committed `delivery_text`. Missing `tick` or `record_decision` becomes `[SILENT]`.
-6. **Exact message ledger.** The proposed delivery text is stored before Hermes returns it.
-7. **Bounded cognition.** At most one reflection and three state changes per tick by default.
-8. **One-way self-restraint.** The model can pause but cannot resume or expand permissions.
-9. **Fail-closed scheduler gate.** Database/config/encryption failure produces no agent run and no
-   delivery.
-10. **Honest prompt contract.** Injected state explicitly rejects sentience and emotion claims.
-
-The final-output verifier requires a Hermes release that supports the `transform_llm_output` plugin
-hook. Avoid stacking another plugin that replaces output before Conscious Agency's transform; Hermes
-uses the first non-empty transform result. Retain conservative budgets and inspect the decision
-ledger during initial testing.
-
-<details>
-<summary>Educational Lab: plugin-level guardrail overrides</summary>
-
-These switches are all `false` by default and are best operated through Hermes Control Center,
-which requires a timed Lab unlock, exact confirmation, configuration backup, cron refresh, gateway
-restart, and hash-chained audit.
-
-```yaml
-plugins:
-  conscious-agency:
-    educational_disable_honesty_contract: true
-    educational_bypass_proactive_gates: true
-    educational_allow_cron_tools: false
-    educational_allow_uncommitted_output: true
-    educational_disable_cycle_limits: true
-    educational_subjective_mode: "continuity"  # off, cold, or continuity
-```
-
-This exact four-on, tool-off shape is **expressive mode**. It removes the plugin's claim contract,
-proactive eligibility gate, final-output commit requirement, and cycle mutation limits while
-strengthening cron tool isolation: tool definitions are removed before the provider call and a
-runtime hook blocks any residual attempt. The cron has no pre-script or project work directory.
-Control Center reports this honestly as `educational_expressive`, not unrestricted.
-
-Setting `educational_allow_cron_tools: true` as well creates the older fully unrestricted research
-profile. That mode can use Hermes tools and is intentionally not the recommended expressive setup.
-The prompt stored in Hermes cron must be refreshed after any control change:
+## Test and verify
 
 ```bash
-hermes conscious-agency install-cron
-hermes gateway restart
+python3 -m pip install -e '.[dev]'
+python3 -m ruff check .
+python3 -m ruff format --check .
+python3 -m pytest -q
 ```
 
-These settings do not remove provider policies, platform restrictions, operating-system access
-controls, the plugin master `enabled` switch, or an operator pause. Expressive mode can produce
-fictional, emotional, or self-descriptive text by design; treat it as model-behavior data, not a
-factual system report.
+The suite covers configuration and legacy migration, deterministic scheduling, active hours,
+task parsing, wake coalescing, cooldown/flood behavior, acknowledgement stripping, main-session
+routing, buffered delivery, activity-time restoration, structured fail-closed output, provider
+request isolation, heartbeat-only tool-loop boundaries, interrupted-run recovery, encrypted-store
+behavior, real-user interruption handoff, and unrelated-cron isolation.
 
-Hermes 0.18.2 independently prepends a delivery wrapper to every cron run, including `[SILENT]`
-suppression and advice not to duplicate automatic delivery with `send_message`. That upstream
-wrapper is outside this plugin and has no supported per-job disable switch in that release.
-
-</details>
-
-## Privacy and data
-
-The SQLite database contains:
-
-- `meta`: self-model, workspace, runtime state, schema version, cron job ID;
-- `events`: bounded lifecycle/tool summaries;
-- `intentions`: goals and statuses;
-- `reflections`: model-authored insights;
-- `decisions`: silence/speech reasons and exact proposed messages.
-- `subjective_entries`: exact final messages, per-model/per-source continuity links, capture source, protocol
-  condition/version, and integrity digest.
-
-Workspace/runtime JSON retains focus-change time and the current/previous genuine user interaction
-times. Intentions store ISO-8601 UTC deadlines. Events, reflections, decisions, and intention rows
-retain their own creation/update timestamps, so the model can tell when state was formed without
-confusing that with when a remembered real-world event occurred in the separate memory plugin.
-
-By default, event records contain message character counts but no user or assistant text. Setting
-`store_transcript_excerpts: true` stores the first `excerpt_char_limit` characters of each turn and
-therefore materially increases privacy risk. Encryption is strongly recommended if excerpts are
-enabled.
-
-The plugin performs no network requests of its own. Scheduled reflection uses Hermes' configured
-model/provider, so the same provider privacy policy applies to the compact state passed to that run.
-The diagnostic event ledger retains lifecycle and tool telemetry, but scheduled model ticks receive
-only meaningful interaction and agency-state events. Reflections and decisions are supplied through
-their dedicated bounded histories.
-
-## Verify a deployment
-
-Run the repository checks first:
+For a live check:
 
 ```bash
-python -m pip install -e '.[dev]'
-python -m ruff format --check .
-python -m ruff check .
-python -m pytest
+hermes gateway status
+hermes conscious-agency heartbeat-status
+hermes conscious-agency run-heartbeat
 ```
 
-Then verify the installed runtime without enabling outbound messages:
-
-```bash
-hermes conscious-agency status
-hermes conscious-agency tick
-hermes conscious-agency run-cron
-hermes cron list
-```
-
-A healthy conservative run ends with `Ran now: succeeded`, stores a concrete decision, and delivers
-only committed text. A healthy expressive run creates a protocol `2.8` journal row, has no script in
-`hermes cron list`, records no successful tool calls, and links the second same-model sample to the
-first. Pseudo-tool and embedded-control artifacts remain in the raw journal but are suppressed from
-delivery.
+Then inspect gateway logs, the Agency event ledger, the subjective journal if enabled, and the
+memory database counts. A silent heartbeat is a valid result.
 
 ## Troubleshooting
 
-Check discovery and registration:
+- **`never_started`:** confirm `heartbeat_enabled: true`, the gateway is running, and the plugin is
+  enabled. The scheduler lives in the gateway process.
+- **`empty_heartbeat_file`:** the installed comments-only template is working. Add one short
+  directive or task when model calls are desired.
+- **`no_tasks_due`:** all parsed tasks are still within their intervals.
+- **`no_main_session`:** send one real message through an external gateway platform first.
+- **`gateway_busy`:** the pending wake is retained and retried after current work finishes.
+- **No Telegram delivery:** use `heartbeat_target: last`, verify the latest external session still
+  has an adapter, and confirm the model selected `notify=true`.
+- **Legacy duplicate schedule:** run `hermes conscious-agency migrate-heartbeat`, then verify that
+  Control Center reports `legacy_agency_cron_absent`.
+- **Local Qwen spends time reasoning:** set `heartbeat_disable_thinking: true`; the endpoint must
+  support the OpenAI-compatible `chat_template_kwargs` extension.
+- **A local model repeats tools:** lower `heartbeat_max_iterations`; this limit is scoped to
+  heartbeat turns and thinking can remain enabled. The plugin intentionally does not impose an
+  output-token cap, so token-level repetition remains bounded by the endpoint and wall-clock
+  timeout.
+- **After a Hermes upgrade:** run the test suite and Control Center native-heartbeat audit before
+  relying on scheduled delivery.
 
-```bash
-HERMES_PLUGINS_DEBUG=1 hermes plugins list
-hermes conscious-agency status
-hermes logs --level WARNING | grep -i conscious-agency
-```
+## License
 
-Common failures:
-
-- **Command not found:** enable the plugin and restart the gateway/CLI process.
-- **Encryption error:** confirm both `sqlcipher3` and `CONSCIOUS_AGENCY_DB_KEY` are available to the
-  Hermes process.
-- **Cron never runs:** the built-in Hermes cron ticker runs inside the gateway; check
-  `hermes cron status`.
-- **No proactive messages:** inspect `hermes conscious-agency tick`; every entry in `blocked_by` is a
-  hard reason.
-- **No scheduled model call:** a paused/disabled reflection gate intentionally emits empty pre-script
-  output, which Hermes treats as silent.
-- **Changed cron settings have no effect:** rerun `hermes conscious-agency install-cron` to refresh
-  the existing job, then verify it with `hermes cron list`.
-- **A local Qwen cron spends minutes in hidden reasoning:** set `cron_disable_thinking: true` and
-  restart Hermes. Agency then merges
-  `chat_template_kwargs.enable_thinking: false` into requests from its own cron session only. The
-  setting requires an OpenAI-compatible backend that accepts this llama.cpp/Qwen request hint;
-  leave it off for providers that do not.
-
-## Development
-
-```bash
-python -m pip install -e '.[dev]'
-ruff format --check .
-ruff check .
-pytest
-```
-
-Tests cover persistence, retention, configuration compatibility, quiet hours across midnight,
-cooldowns, daily budgets, recent-user protection, independent reflection/speech gates, fail-closed
-encryption, tool isolation, mutation limits, honest and temporal context, deadline normalization,
-Hermes surface registration, provider-boundary tool removal, script/workdir detachment, protocol
-separation, prior-ending continuity, and delivery artifact filtering.
-
-## Status
-
-Version `0.6.0` is a bounded, time-aware agency product with a default-off longitudinal experiment
-and expressive protocol `2.8`. The scheduler contract still has one job, one persistent store, one
-delivery path, and one operator pause. Experimental behavior is removed by setting
-`educational_subjective_mode: off`; existing journal rows are preserved until the operator deletes
-or restores the encrypted database deliberately.
+MIT. Heartbeat portions adapted from OpenClaw are documented in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).

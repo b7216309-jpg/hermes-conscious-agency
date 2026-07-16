@@ -2,6 +2,27 @@
 
 All notable changes are documented here.
 
+## 1.0.0 - 2026-07-16
+
+- Replaced the plugin-owned Hermes cron with a gateway-native heartbeat in the latest external
+  main session, preserving real conversational continuity and genuine-user activity time.
+- Adapted OpenClaw's deterministic phase scheduling, active hours, comment-only preflight,
+  periodic tasks, wake intents, cooldown, flood guard, and acknowledgement suppression.
+- Added buffered heartbeat delivery, busy-gateway deferral, durable wake/state files, structured
+  `heartbeat_respond`, due-intention wakes, and `last`/`none` delivery targets.
+- Added a heartbeat-only tool-iteration boundary, first-decision locking, post-decision tool
+  removal, and interrupted-run reconciliation without shortening the wall-clock timeout,
+  disabling model thinking, or imposing an output-token cap.
+- Made genuine inbound messages preempt heartbeat context, preserve their real activity timestamp,
+  and suppress the heartbeat runner's delivery path so a recursively processed user response can
+  never be sent twice.
+- Added an atomic one-release migration for legacy config keys and exact removal of only the cron
+  job ID recorded by Conscious Agency; unrelated Hermes jobs remain untouched.
+- Removed the obsolete cron module, gate script workflow, cron CLI actions, stored prompt snapshot,
+  and their tests.
+- Added a comments-only `HEARTBEAT.md` installer template, third-party attribution, live-status and
+  manual-wake commands, and comprehensive native-heartbeat regression tests.
+
 ## 0.6.0 - 2026-07-16
 
 - Reduced normal Agency context to current time and material persistent state; removed repeated

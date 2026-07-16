@@ -48,7 +48,7 @@ def test_registers_complete_hermes_surface(tmp_path, monkeypatch):
     plugin = load_plugin()
     context = FakeContext()
     plugin.register(context)
-    assert set(context.tools) == {"conscious_agency"}
+    assert set(context.tools) == {"conscious_agency", "heartbeat_respond"}
     assert set(context.hooks) == {
         "pre_gateway_dispatch",
         "pre_llm_call",
@@ -66,14 +66,14 @@ def test_registers_complete_hermes_surface(tmp_path, monkeypatch):
     assert set(context.middleware) == {"llm_request"}
 
 
-def test_expressive_subjective_mode_hides_cron_only_tool_actions(tmp_path, monkeypatch):
+def test_expressive_subjective_mode_hides_heartbeat_only_tool_actions(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text(
         "plugins:\n  conscious-agency:\n"
         "    educational_subjective_mode: continuity\n"
         "    educational_disable_honesty_contract: true\n"
         "    educational_bypass_proactive_gates: true\n"
-        "    educational_allow_cron_tools: false\n"
+        "    educational_allow_heartbeat_tools: false\n"
         "    educational_allow_uncommitted_output: true\n"
         "    educational_disable_cycle_limits: true\n",
         encoding="utf-8",

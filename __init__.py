@@ -6,18 +6,20 @@ from copy import deepcopy
 
 if __package__:  # Hermes loads this as a package.
     from .agency.cli import cli_command, register_cli, slash_command
+    from .agency.heartbeat import arm_gateway_integration
     from .agency.runtime import AgencyRuntime
-    from .agency.schemas import CONSCIOUS_AGENCY_SCHEMA
+    from .agency.schemas import CONSCIOUS_AGENCY_SCHEMA, HEARTBEAT_RESPONSE_SCHEMA
 else:  # Direct test/dev import of a plugin-root __init__.py.
     from agency.cli import cli_command, register_cli, slash_command
+    from agency.heartbeat import arm_gateway_integration
     from agency.runtime import AgencyRuntime
-    from agency.schemas import CONSCIOUS_AGENCY_SCHEMA
+    from agency.schemas import CONSCIOUS_AGENCY_SCHEMA, HEARTBEAT_RESPONSE_SCHEMA
 
 
 def register(ctx) -> None:
     runtime = AgencyRuntime()
     schema = deepcopy(CONSCIOUS_AGENCY_SCHEMA)
-    if runtime._expressive_subjective_cron():
+    if runtime._expressive_subjective_heartbeat():
         actions = schema["parameters"]["properties"]["action"]["enum"]
         schema["parameters"]["properties"]["action"]["enum"] = [
             action for action in actions if action not in {"tick", "record_decision"}
@@ -28,6 +30,13 @@ def register(ctx) -> None:
         schema=schema,
         handler=runtime.tool_handler,
         emoji="🧭",
+    )
+    ctx.register_tool(
+        name="heartbeat_respond",
+        toolset="conscious_agency",
+        schema=deepcopy(HEARTBEAT_RESPONSE_SCHEMA),
+        handler=runtime.heartbeat_handler,
+        emoji="💓",
     )
     ctx.register_hook("pre_gateway_dispatch", runtime.pre_gateway_dispatch)
     ctx.register_hook("pre_llm_call", runtime.pre_llm_call)
@@ -53,3 +62,4 @@ def register(ctx) -> None:
         handler_fn=cli_command,
         description="Persistent self-model, intentions, reflection, and bounded initiative.",
     )
+    arm_gateway_integration(runtime)

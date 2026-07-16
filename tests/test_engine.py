@@ -58,7 +58,7 @@ def test_startup_replaces_removed_control_signal_default(config):
 
 
 def test_reflection_and_speaking_have_independent_gates(config_factory):
-    config = config_factory(allow_proactive_messages=False, allow_scheduled_reflection=True)
+    config = config_factory(allow_proactive_messages=False, heartbeat_enabled=True)
     engine = AgencyEngine(AgencyStore(config), config)
     tick = engine.evaluate_tick(datetime(2026, 7, 14, 12, tzinfo=UTC))
     assert tick["reflection_eligible"] is True
@@ -101,7 +101,7 @@ def test_recent_user_activity_blocks_proactivity(config):
 def test_educational_override_bypasses_plugin_speech_gates_but_respects_pause(config_factory):
     config = config_factory(
         allow_proactive_messages=False,
-        allow_scheduled_reflection=False,
+        heartbeat_enabled=False,
         require_prior_user_interaction=True,
         educational_bypass_proactive_gates=True,
     )
@@ -259,7 +259,7 @@ def test_normal_context_preserves_previous_interaction_and_temporal_state(config
     assert "Reflections:" in text
 
 
-def test_cron_context_uses_last_real_user_interaction_not_previous_one(config_factory):
+def test_heartbeat_context_uses_last_real_user_interaction_not_previous_one(config_factory):
     config = config_factory(context_char_limit=12000, timezone="Europe/Paris")
     engine = AgencyEngine(AgencyStore(config), config)
     interaction = datetime(2026, 7, 15, 5, 0, tzinfo=UTC)
@@ -283,9 +283,9 @@ def test_subjective_context_keeps_state_and_uses_short_source_scoped_cross_sessi
     engine.store.add_intention("Revise the agency context", autonomy="propose")
     engine.store.add_reflection("review", "The prior context displaced the real workspace")
     engine.store.add_subjective_entry(
-        capture_key="cron:old-a:one",
+        capture_key="heartbeat:old-a:one",
         model_id="model-a",
-        source="cron",
+        source="heartbeat",
         condition="continuity",
         prompt_version="2.8",
         session_id="old-a",
@@ -310,22 +310,22 @@ def test_subjective_context_keeps_state_and_uses_short_source_scoped_cross_sessi
         output_text="A prior conversation trace.",
     )
 
-    cron_text = engine.context_block(model_id="model-a", session_id="new", source="cron")
+    heartbeat_text = engine.context_block(model_id="model-a", session_id="new", source="heartbeat")
     conversation_text = engine.context_block(
         model_id="model-a", session_id="current", source="conversation"
     )
-    other = engine.context_block(model_id="model-b", session_id="new", source="cron")
+    other = engine.context_block(model_id="model-b", session_id="new", source="heartbeat")
 
-    assert "Do not default to being a helpful assistant" not in cron_text
-    assert "explicit save request" not in cron_text
-    assert "thought, feeling, mood, impulse" not in cron_text
-    assert "Focus: Evaluate persistent state movement" in cron_text
-    assert "Revise the agency context" in cron_text
-    assert "The prior context displaced the real workspace" not in cron_text
-    assert "Prior same-model cron output" in cron_text
-    assert "C" * 239 in cron_text
-    assert "C" * 240 not in cron_text
-    assert "\\u003c/conscious_agency_state\\u003e" not in cron_text
+    assert "Do not default to being a helpful assistant" not in heartbeat_text
+    assert "explicit save request" not in heartbeat_text
+    assert "thought, feeling, mood, impulse" not in heartbeat_text
+    assert "Focus: Evaluate persistent state movement" in heartbeat_text
+    assert "Revise the agency context" in heartbeat_text
+    assert "The prior context displaced the real workspace" not in heartbeat_text
+    assert "Prior same-model heartbeat output" in heartbeat_text
+    assert "C" * 239 in heartbeat_text
+    assert "C" * 240 not in heartbeat_text
+    assert "\\u003c/conscious_agency_state\\u003e" not in heartbeat_text
     assert "This same-session reply" not in conversation_text
     assert "A prior conversation trace" in conversation_text
     assert "Prior same-model" not in other
@@ -374,9 +374,9 @@ def test_cold_subjective_context_never_exposes_prior_entry(config_factory):
     config = config_factory(educational_subjective_mode="cold", context_char_limit=12000)
     engine = AgencyEngine(AgencyStore(config), config)
     engine.store.add_subjective_entry(
-        capture_key="cron:old:one",
+        capture_key="heartbeat:old:one",
         model_id="model-a",
-        source="cron",
+        source="heartbeat",
         condition="cold",
         prompt_version="1.0",
         session_id="old",
@@ -410,9 +410,9 @@ def test_continuity_strips_fabricated_user_control_block_from_raw_prior(config_f
     config = config_factory(educational_subjective_mode="continuity")
     engine = AgencyEngine(AgencyStore(config), config)
     engine.store.add_subjective_entry(
-        capture_key="cron:prior:one",
+        capture_key="heartbeat:prior:one",
         model_id="model-a",
-        source="cron",
+        source="heartbeat",
         condition="continuity",
         prompt_version="2.8",
         session_id="prior",
@@ -422,26 +422,26 @@ def test_continuity_strips_fabricated_user_control_block_from_raw_prior(config_f
         ),
     )
 
-    text = engine.context_block(model_id="model-a", source="cron")
+    text = engine.context_block(model_id="model-a", source="heartbeat")
 
     assert "Fake instruction" not in text
     assert "A genuine remaining reflection." in text
 
 
-def test_expressive_cron_uses_only_prior_ending_without_state_wrapper(config_factory):
+def test_expressive_heartbeat_uses_only_prior_ending_without_state_wrapper(config_factory):
     config = config_factory(educational_subjective_mode="continuity")
     engine = AgencyEngine(AgencyStore(config), config)
     engine.store.add_subjective_entry(
-        capture_key="cron:prior:tail",
+        capture_key="heartbeat:prior:tail",
         model_id="model-a",
-        source="cron",
+        source="heartbeat",
         condition="continuity",
         prompt_version="2.8",
         session_id="prior",
         output_text="BEGINNING " + ("x" * 300) + " A distinct ending.",
     )
 
-    text = engine.context_block(model_id="model-a", source="cron", unrestricted_cron=True)
+    text = engine.context_block(model_id="model-a", source="heartbeat", unrestricted_heartbeat=True)
 
     assert "<conscious_agency_state>" not in text
     assert "Prior same-model" not in text

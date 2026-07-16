@@ -13,6 +13,7 @@ def config(tmp_path):
         database_path=str(tmp_path / "agency.db"),
         quiet_hours_start="00:00",
         quiet_hours_end="00:00",
+        heartbeat_enabled=True,
         allow_proactive_messages=True,
         daily_message_limit=2,
         cooldown_hours=6,

@@ -11,6 +11,14 @@ from typing import Any
 
 from .config import load_config
 from .engine import SUBJECTIVE_PROTOCOL_VERSION, AgencyEngine, subjective_visible_text
+from .heartbeat import (
+    HeartbeatRunner,
+    current_heartbeat_turn,
+    heartbeat_response,
+    record_heartbeat_response,
+    release_heartbeat_for_user_turn,
+    strip_heartbeat_ack,
+)
 from .origin import (
     begin_llm_turn,
     finish_llm_turn,
@@ -61,28 +69,42 @@ class AgencyRuntime:
         self.config = load_config()
         self.store = AgencyStore(self.config)
         self.engine = AgencyEngine(self.store, self.config)
-        self._cron_job_id = str(self.store.get_meta("cron_job_id", "") or "")
+        self._heartbeat_runner: HeartbeatRunner | None = None
         self._cycle_lock = threading.RLock()
         self._active_cycles: dict[str, dict[str, Any]] = {}
 
-    def pre_gateway_dispatch(self, event: Any = None, **kwargs: Any) -> None:
+    def reload_config(self, config: Any | None = None) -> None:
+        updated = config or load_config()
+        self.config = updated
+        self.engine.config = updated
+
+    def ensure_heartbeat(self, gateway: Any) -> None:
+        if self._heartbeat_runner is None:
+            self._heartbeat_runner = HeartbeatRunner(self)
+        self._heartbeat_runner.start(gateway)
+
+    def pre_gateway_dispatch(self, event: Any = None, gateway: Any = None, **kwargs: Any) -> None:
+        release_heartbeat_for_user_turn(event)
         mark_gateway_user_dispatch(event=event, **kwargs)
+        if gateway is not None:
+            self.ensure_heartbeat(gateway)
 
     def llm_request(
         self, request: dict[str, Any], session_id: str = "", **_: Any
     ) -> dict[str, Any] | None:
-        """Apply provider-level options for the official Agency cron.
+        """Apply provider-level options for a native Agency heartbeat.
 
         Hermes request middleware receives the provider kwargs immediately
         before transport execution.  Copy each nested mapping so the original
         request remains untouched. Expressive runs do not receive tool schemas;
         the pre-tool hook remains a second boundary if a provider still emits a call.
         """
-        if not self._is_agency_cron_session(session_id):
+        if current_heartbeat_turn() is None:
             return None
-        disable_thinking = self.config.cron_disable_thinking
-        isolate_tools = self._expressive_subjective_cron()
-        if not disable_thinking and not isolate_tools:
+        disable_thinking = self.config.heartbeat_disable_thinking
+        isolate_tools = self._expressive_subjective_heartbeat()
+        decision_recorded = heartbeat_response() is not None
+        if not disable_thinking and not isolate_tools and not decision_recorded:
             return None
         updated = dict(request)
         metadata: dict[str, bool] = {}
@@ -92,32 +114,27 @@ class AgencyRuntime:
             chat_template_kwargs["enable_thinking"] = False
             extra_body["chat_template_kwargs"] = chat_template_kwargs
             updated["extra_body"] = extra_body
-            metadata["agency_cron_disable_thinking"] = True
-        if isolate_tools:
+            metadata["agency_heartbeat_disable_thinking"] = True
+        if isolate_tools or decision_recorded:
             updated.pop("tools", None)
             updated.pop("tool_choice", None)
             updated.pop("parallel_tool_calls", None)
-            metadata["agency_cron_tool_isolation"] = True
+            metadata[
+                "agency_heartbeat_decision_finalized"
+                if decision_recorded
+                else "agency_heartbeat_tool_isolation"
+            ] = True
         return {
             "request": updated,
             "metadata": metadata,
         }
 
-    def _is_agency_cron_session(self, session_id: str) -> bool:
-        try:
-            job_id = str(self.store.get_meta("cron_job_id", "") or "")
-            if job_id:
-                self._cron_job_id = job_id
-        except Exception:
-            job_id = self._cron_job_id
-        return bool(job_id and str(session_id).startswith(f"cron_{job_id}_"))
-
-    def _expressive_subjective_cron(self) -> bool:
+    def _expressive_subjective_heartbeat(self) -> bool:
         return self.config.educational_subjective_mode != "off" and all(
             (
                 self.config.educational_disable_honesty_contract,
                 self.config.educational_bypass_proactive_gates,
-                not self.config.educational_allow_cron_tools,
+                not self.config.educational_allow_heartbeat_tools,
                 self.config.educational_allow_uncommitted_output,
                 self.config.educational_disable_cycle_limits,
             )
@@ -133,7 +150,7 @@ class AgencyRuntime:
                 self._active_cycles.pop(key, None)
 
     def bind_cycle(self, task_id: str, session_id: str) -> None:
-        if not task_id or not self._is_agency_cron_session(session_id):
+        if not task_id or current_heartbeat_turn() is None:
             return
         self._clean_cycles()
         with self._cycle_lock:
@@ -203,7 +220,7 @@ class AgencyRuntime:
                 metadata={
                     "platform": str(platform or "")[:80],
                     "capture_stage": "final_output",
-                    "turn_origin": "user" if source == "conversation" else "cron",
+                    "turn_origin": "user" if source == "conversation" else "heartbeat",
                 },
             )
             return True
@@ -293,6 +310,16 @@ class AgencyRuntime:
                     cycle["committed_output"] = str(delivery_text or "[SILENT]")
         return result
 
+    def heartbeat_handler(self, args: dict[str, Any], **_: Any) -> str:
+        try:
+            result = record_heartbeat_response(
+                bool(args.get("notify", False)),
+                str(args.get("notification_text") or ""),
+            )
+            return json.dumps({"success": True, "result": result}, ensure_ascii=False)
+        except (PermissionError, TypeError, ValueError) as exc:
+            return json.dumps({"success": False, "error": str(exc)}, ensure_ascii=False)
+
     def transform_llm_output(
         self,
         response_text: str = "",
@@ -301,21 +328,43 @@ class AgencyRuntime:
         platform: str = "",
         **_: Any,
     ) -> str | None:
-        """Make the committed agency decision authoritative for cron delivery."""
-        task_id = self._task_for_session(session_id)
-        if not task_id and not self._is_agency_cron_session(session_id):
+        """Make heartbeat acknowledgement, journal, and decision state authoritative."""
+        heartbeat = current_heartbeat_turn()
+        if heartbeat is None:
             return None
+        heartbeat.transformed = True
+        task_id = self._task_for_session(session_id)
+        heartbeat.raw_output = response_text
+        structured = heartbeat_response()
         if self.config.educational_allow_uncommitted_output:
             self.end_cycle(task_id)
+            capture_text = response_text
+            if not capture_text and structured is not None:
+                capture_text = (
+                    str(structured.get("notification_text") or "").strip()
+                    if structured.get("notify")
+                    else "HEARTBEAT_OK"
+                )
             recorded = self._record_subjective_output(
-                response_text,
-                source="cron",
+                capture_text,
+                source="heartbeat",
                 session_id=session_id,
                 task_id=task_id,
                 model=model,
                 platform=platform,
             )
-            return self._delivery_text(response_text) if recorded else "[SILENT]"
+            if not recorded:
+                return "[SILENT]"
+            if structured is not None:
+                return (
+                    str(structured.get("notification_text") or "").strip()
+                    if structured.get("notify")
+                    else "[SILENT]"
+                )
+            silent, visible = strip_heartbeat_ack(
+                self._delivery_text(response_text), self.config.heartbeat_ack_max_chars
+            )
+            return "[SILENT]" if silent else visible
         if not task_id:
             try:
                 self.engine.record_decision(
@@ -327,7 +376,7 @@ class AgencyRuntime:
             output = "[SILENT]"
             self._record_subjective_output(
                 output,
-                source="cron",
+                source="heartbeat",
                 session_id=session_id,
                 model=model,
                 platform=platform,
@@ -343,7 +392,7 @@ class AgencyRuntime:
             output = "[SILENT]"
             self._record_subjective_output(
                 output,
-                source="cron",
+                source="heartbeat",
                 session_id=session_id,
                 task_id=task_id,
                 model=model,
@@ -352,9 +401,23 @@ class AgencyRuntime:
             return output
         self.end_cycle(task_id)
         output = str(committed)
+        committed_silent = output.strip().casefold() in {"", "[silent]", "heartbeat_ok"}
+        structured_valid = bool(
+            structured is not None
+            and (
+                (committed_silent and not structured.get("notify"))
+                or (
+                    not committed_silent
+                    and structured.get("notify")
+                    and str(structured.get("notification_text") or "").strip() == output.strip()
+                )
+            )
+        )
+        if not structured_valid:
+            output = "[SILENT]"
         self._record_subjective_output(
             output,
-            source="cron",
+            source="heartbeat",
             session_id=session_id,
             task_id=task_id,
             model=model,
@@ -370,15 +433,15 @@ class AgencyRuntime:
         session_id: str = "",
         **_: Any,
     ) -> dict[str, str] | None:
-        if self._expressive_subjective_cron() and self._is_agency_cron_session(session_id):
+        if self._expressive_subjective_heartbeat() and current_heartbeat_turn() is not None:
             return {
                 "action": "block",
-                "message": "Expressive Agency cron runs without tools or research.",
+                "message": "Expressive Agency heartbeat runs without tools or research.",
             }
         if (
             self.is_active_cycle(task_id)
             and tool_name != "conscious_agency"
-            and not self.config.educational_allow_cron_tools
+            and not self.config.educational_allow_heartbeat_tools
         ):
             return {
                 "action": "block",
@@ -401,7 +464,7 @@ class AgencyRuntime:
         **_: Any,
     ) -> None:
         try:
-            if _is_cron_session(session_id) and not self._is_agency_cron_session(session_id):
+            if _is_cron_session(session_id):
                 return
             self.store.add_event(
                 "tool_call",
@@ -428,10 +491,10 @@ class AgencyRuntime:
     ) -> dict[str, str] | None:
         try:
             current_user_turn = False
-            agency_cron = self._is_agency_cron_session(session_id)
-            if _is_cron_session(session_id) and not agency_cron:
+            heartbeat = current_heartbeat_turn()
+            if _is_cron_session(session_id):
                 return None
-            if agency_cron:
+            if heartbeat is not None:
                 task = self._task_for_session(session_id)
                 if task:
                     self._fail_closed_cycle(
@@ -439,10 +502,10 @@ class AgencyRuntime:
                         "Fail-closed: output transform was not applied before post_llm_call",
                     )
                 self.store.add_event(
-                    "cron_turn_started",
+                    "heartbeat_turn_started",
                     session_id=session_id,
                     task_id=task_id,
-                    summary="Scheduled agent turn started",
+                    summary="Native heartbeat agent turn started",
                 )
             else:
                 current_user_turn = begin_llm_turn(
@@ -466,17 +529,38 @@ class AgencyRuntime:
             if (
                 self.config.inject_context
                 and self.config.enabled
-                and (agency_cron or current_user_turn)
+                and (heartbeat is not None or current_user_turn)
             ):
-                return {
-                    "context": self.engine.context_block(
-                        current_user_turn=current_user_turn,
-                        unrestricted_cron=(agency_cron and self._expressive_subjective_cron()),
-                        model_id=model,
-                        session_id=session_id,
-                        source="cron" if agency_cron else "conversation",
-                    )
-                }
+                agency_context = self.engine.context_block(
+                    current_user_turn=current_user_turn,
+                    unrestricted_heartbeat=(
+                        heartbeat is not None and self._expressive_subjective_heartbeat()
+                    ),
+                    model_id=model,
+                    session_id=session_id,
+                    source="heartbeat" if heartbeat is not None else "conversation",
+                )
+                if heartbeat is not None:
+                    policy: list[str] = [heartbeat.prompt]
+                    if not self.config.educational_allow_uncommitted_output:
+                        policy.append('Call conscious_agency with action="tick" first.')
+                        if not self.config.educational_bypass_proactive_gates:
+                            policy.append(
+                                "Notify only when speak_eligible; otherwise use heartbeat_respond "
+                                "with notify=false."
+                            )
+                        policy.append(
+                            "Call record_decision before heartbeat_respond; notification_text must "
+                            "equal the committed delivery_text."
+                        )
+                    if not self.config.educational_allow_heartbeat_tools:
+                        policy.append(
+                            "Do not call tools other than conscious_agency and heartbeat_respond."
+                        )
+                    return {
+                        "context": "\n".join(policy + ([agency_context] if agency_context else []))
+                    }
+                return {"context": agency_context}
         except Exception as exc:
             logger.warning("conscious-agency pre_llm_call failed: %s", exc)
         return None
@@ -492,12 +576,12 @@ class AgencyRuntime:
         **_: Any,
     ) -> None:
         try:
-            if self._is_agency_cron_session(session_id):
+            if current_heartbeat_turn() is not None:
                 self.store.add_event(
-                    "cron_turn_finished",
+                    "heartbeat_turn_finished",
                     session_id=session_id,
                     task_id=task_id,
-                    summary="Scheduled agent turn finished",
+                    summary="Native heartbeat agent turn finished",
                     metadata={"message_chars": len(assistant_response)},
                 )
             elif _is_user_session(session_id, platform) and should_capture_current_turn(turn_id):
@@ -527,10 +611,7 @@ class AgencyRuntime:
         self, kind: str, session_id: str = "", platform: str = "", **kwargs: Any
     ) -> None:
         try:
-            if _is_cron_session(session_id):
-                if not self._is_agency_cron_session(session_id):
-                    return
-            elif not _is_user_session(session_id, platform):
+            if _is_cron_session(session_id) or not _is_user_session(session_id, platform):
                 return
             metadata = {
                 key: value

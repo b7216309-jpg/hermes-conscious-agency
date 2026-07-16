@@ -64,3 +64,23 @@ CONSCIOUS_AGENCY_SCHEMA = {
         "required": ["action"],
     },
 }
+
+
+HEARTBEAT_RESPONSE_SCHEMA = {
+    "name": "heartbeat_respond",
+    "description": (
+        "Complete the current native heartbeat. Use notify=false for no user interruption. "
+        "Use notify=true with notification_text only when the user should receive a message."
+    ),
+    "parameters": {
+        "type": "object",
+        "properties": {
+            "notify": {"type": "boolean"},
+            "notification_text": {
+                "type": "string",
+                "description": "Exact user-visible message when notify is true.",
+            },
+        },
+        "required": ["notify"],
+    },
+}

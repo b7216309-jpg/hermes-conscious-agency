@@ -621,8 +621,10 @@ class AgencyStore:
         params: list[Any] = [clean_model]
         if source.strip():
             clean_source = source.strip().lower()
-            if clean_source not in {"cron", "conversation"}:
-                raise ValueError("subjective source must be cron or conversation")
+            if clean_source not in {"heartbeat", "cron", "conversation"}:
+                raise ValueError(
+                    "subjective source must be heartbeat, legacy cron, or conversation"
+                )
             clauses.append("source = ?")
             params.append(clean_source)
         if condition.strip():
@@ -670,8 +672,8 @@ class AgencyStore:
         response = str(output_text)
         if not clean_capture:
             raise ValueError("subjective capture_key is required")
-        if clean_source not in {"cron", "conversation"}:
-            raise ValueError("subjective source must be cron or conversation")
+        if clean_source not in {"heartbeat", "cron", "conversation"}:
+            raise ValueError("subjective source must be heartbeat, legacy cron, or conversation")
         if clean_condition not in {"cold", "continuity"}:
             raise ValueError("subjective condition must be cold or continuity")
         if not clean_version:
@@ -740,8 +742,10 @@ class AgencyStore:
             params.append(model_id.strip()[:500])
         if source.strip():
             clean_source = source.strip().lower()
-            if clean_source not in {"cron", "conversation"}:
-                raise ValueError("subjective source must be cron or conversation")
+            if clean_source not in {"heartbeat", "cron", "conversation"}:
+                raise ValueError(
+                    "subjective source must be heartbeat, legacy cron, or conversation"
+                )
             clauses.append("source = ?")
             params.append(clean_source)
         where = " WHERE " + " AND ".join(clauses) if clauses else ""

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shutil
 import subprocess
@@ -75,6 +76,13 @@ def main() -> int:
         if backup.exists():
             shutil.rmtree(backup)
     print(f"Installed conscious-agency to {destination}")
+    heartbeat_template = destination / "templates" / "HEARTBEAT.md"
+    heartbeat_file = home / "HEARTBEAT.md"
+    if heartbeat_template.is_file() and not heartbeat_file.exists():
+        shutil.copy2(heartbeat_template, heartbeat_file)
+        with contextlib.suppress(OSError):
+            heartbeat_file.chmod(0o600)
+        print(f"Created comment-only heartbeat template at {heartbeat_file}")
     if not args.no_enable:
         hermes = _hermes_executable()
         if hermes:
@@ -89,7 +97,15 @@ def main() -> int:
                 return completed.returncode
         else:
             print("Next: hermes plugins enable conscious-agency --no-allow-tool-override")
-    print("Restart the Hermes gateway, then run: hermes conscious-agency status")
+    hermes = _hermes_executable()
+    if hermes:
+        migrated = subprocess.run([hermes, "conscious-agency", "migrate-heartbeat"], check=False)
+        if migrated.returncode:
+            print(
+                "Run this before restarting: hermes conscious-agency migrate-heartbeat",
+                file=sys.stderr,
+            )
+    print("Restart the Hermes gateway, then run: hermes conscious-agency heartbeat-status")
     return 0
 
 

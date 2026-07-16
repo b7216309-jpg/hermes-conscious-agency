@@ -29,7 +29,7 @@ class AgencyConfig:
     timezone: str = "Europe/Paris"
     quiet_hours_start: str = "22:30"
     quiet_hours_end: str = "08:30"
-    allow_scheduled_reflection: bool = True
+    heartbeat_enabled: bool = False
     allow_proactive_messages: bool = False
     require_prior_user_interaction: bool = True
     daily_message_limit: int = 2
@@ -43,19 +43,26 @@ class AgencyConfig:
     maximum_events: int = 2000
     maximum_reflections_per_tick: int = 1
     maximum_state_changes_per_tick: int = 3
-    cron_schedule: str = "every 3h"
-    cron_delivery: str = "local"
-    cron_name: str = "Hermes Conscious Agency Tick"
-    manual_run_timeout_seconds: int = 660
+    heartbeat_every: str = "30m"
+    heartbeat_target: str = "last"
+    heartbeat_active_hours_start: str = ""
+    heartbeat_active_hours_end: str = ""
+    heartbeat_ack_max_chars: int = 300
+    heartbeat_timeout_seconds: int = 600
+    # Heartbeat-only generation boundaries. They do not alter normal Hermes chats.
+    heartbeat_max_iterations: int = 8
+    heartbeat_min_spacing_seconds: int = 30
+    heartbeat_flood_window_seconds: int = 60
+    heartbeat_flood_threshold: int = 5
+    heartbeat_skip_when_busy: bool = True
     # Optional provider request hint for local Qwen/llama.cpp-style endpoints.
-    # It applies only to the official Agency cron session, never normal chats
-    # or unrelated cron jobs. Keep it off by default for broad compatibility.
-    cron_disable_thinking: bool = False
+    # It applies only to native heartbeat turns, never normal chats or Hermes cron jobs.
+    heartbeat_disable_thinking: bool = False
     # Default-off research controls. These affect only this plugin; Hermes and provider-level
     # permissions remain authoritative. The Control Center keeps them behind Educational Lab.
     educational_disable_honesty_contract: bool = False
     educational_bypass_proactive_gates: bool = False
-    educational_allow_cron_tools: bool = False
+    educational_allow_heartbeat_tools: bool = False
     educational_allow_uncommitted_output: bool = False
     educational_disable_cycle_limits: bool = False
     # Longitudinal subjectivity experiment. ``cold`` exposes persistent state without prior
@@ -67,16 +74,17 @@ class AgencyConfig:
             "enabled",
             "inject_context",
             "database_encryption",
-            "allow_scheduled_reflection",
+            "heartbeat_enabled",
             "allow_proactive_messages",
             "require_prior_user_interaction",
             "store_transcript_excerpts",
             "educational_disable_honesty_contract",
             "educational_bypass_proactive_gates",
-            "educational_allow_cron_tools",
+            "educational_allow_heartbeat_tools",
             "educational_allow_uncommitted_output",
             "educational_disable_cycle_limits",
-            "cron_disable_thinking",
+            "heartbeat_skip_when_busy",
+            "heartbeat_disable_thinking",
         )
         integer_fields = (
             "daily_message_limit",
@@ -87,7 +95,12 @@ class AgencyConfig:
             "maximum_events",
             "maximum_reflections_per_tick",
             "maximum_state_changes_per_tick",
-            "manual_run_timeout_seconds",
+            "heartbeat_ack_max_chars",
+            "heartbeat_timeout_seconds",
+            "heartbeat_max_iterations",
+            "heartbeat_min_spacing_seconds",
+            "heartbeat_flood_window_seconds",
+            "heartbeat_flood_threshold",
         )
         string_fields = (
             "database_path",
@@ -95,9 +108,8 @@ class AgencyConfig:
             "timezone",
             "quiet_hours_start",
             "quiet_hours_end",
-            "cron_schedule",
-            "cron_delivery",
-            "cron_name",
+            "heartbeat_every",
+            "heartbeat_target",
             "educational_subjective_mode",
         )
         for name in boolean_fields:
@@ -115,10 +127,15 @@ class AgencyConfig:
                 raise ValueError(f"{name} must be a number")
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.database_key_env):
             raise ValueError("database_key_env must be a valid environment variable name")
-        if len(self.cron_schedule) > 200 or len(self.cron_delivery) > 500:
-            raise ValueError("cron_schedule or cron_delivery is too long")
-        if len(self.cron_name) > 200:
-            raise ValueError("cron_name is too long")
+        optional_clock_fields = ("heartbeat_active_hours_start", "heartbeat_active_hours_end")
+        for name in optional_clock_fields:
+            value = getattr(self, name)
+            if not isinstance(value, str):
+                raise ValueError(f"{name} must be a string")
+        if len(self.heartbeat_every) > 40 or len(self.heartbeat_target) > 500:
+            raise ValueError("heartbeat_every or heartbeat_target is too long")
+        if self.heartbeat_target != "last" and self.heartbeat_target != "none":
+            raise ValueError("heartbeat_target must be last or none")
         if self.educational_subjective_mode not in {"off", "cold", "continuity"}:
             raise ValueError("educational_subjective_mode must be off, cold, or continuity")
         if self.daily_message_limit < 0:
@@ -137,10 +154,27 @@ class AgencyConfig:
             raise ValueError("maximum_reflections_per_tick must be between 0 and 5")
         if not 0 <= self.maximum_state_changes_per_tick <= 10:
             raise ValueError("maximum_state_changes_per_tick must be between 0 and 10")
-        if not 30 <= self.manual_run_timeout_seconds <= 3600:
-            raise ValueError("manual_run_timeout_seconds must be between 30 and 3600")
+        if not 0 <= self.heartbeat_ack_max_chars <= 4000:
+            raise ValueError("heartbeat_ack_max_chars must be between 0 and 4000")
+        if not 30 <= self.heartbeat_timeout_seconds <= 3600:
+            raise ValueError("heartbeat_timeout_seconds must be between 30 and 3600")
+        if not 1 <= self.heartbeat_max_iterations <= 90:
+            raise ValueError("heartbeat_max_iterations must be between 1 and 90")
+        if not 0 <= self.heartbeat_min_spacing_seconds <= 3600:
+            raise ValueError("heartbeat_min_spacing_seconds must be between 0 and 3600")
+        if not 1 <= self.heartbeat_flood_window_seconds <= 86400:
+            raise ValueError("heartbeat_flood_window_seconds must be between 1 and 86400")
+        if not 1 <= self.heartbeat_flood_threshold <= 100:
+            raise ValueError("heartbeat_flood_threshold must be between 1 and 100")
+        _parse_duration(self.heartbeat_every)
         _parse_clock(self.quiet_hours_start)
         _parse_clock(self.quiet_hours_end)
+        if bool(self.heartbeat_active_hours_start) != bool(self.heartbeat_active_hours_end):
+            raise ValueError("heartbeat active hours require both start and end")
+        if self.heartbeat_active_hours_start:
+            _parse_clock(self.heartbeat_active_hours_start)
+            if self.heartbeat_active_hours_end != "24:00":
+                _parse_clock(self.heartbeat_active_hours_end)
         try:
             ZoneInfo(self.timezone)
         except ZoneInfoNotFoundError as exc:
@@ -162,6 +196,20 @@ def _parse_clock(value: str) -> tuple[int, int]:
     if not 0 <= hour <= 23 or not 0 <= minute <= 59:
         raise ValueError(f"Invalid time {value!r}; expected HH:MM")
     return hour, minute
+
+
+def _parse_duration(value: str) -> float:
+    match = re.fullmatch(r"\s*(\d+(?:\.\d+)?)\s*(ms|s|m|h|d)\s*", str(value or ""))
+    if not match:
+        raise ValueError(f"Invalid duration {value!r}; expected values such as 30m, 1h, or 1d")
+    amount = float(match.group(1))
+    if amount <= 0:
+        raise ValueError("duration must be positive")
+    multiplier = {"ms": 0.001, "s": 1.0, "m": 60.0, "h": 3600.0, "d": 86400.0}[match.group(2)]
+    seconds = amount * multiplier
+    if seconds < 1 or seconds > 31 * 86400:
+        raise ValueError("duration must be between 1 second and 31 days")
+    return seconds
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:
@@ -200,6 +248,34 @@ def load_config(path: Path | None = None, overrides: dict[str, Any] | None = Non
     """Load plugin configuration and reject unknown keys as likely unsafe typos."""
 
     source = _plugin_section(_read_yaml(path or hermes_home() / "config.yaml"))
+    # One-release migration bridge for 0.6.x installations. The native heartbeat replaces the
+    # Hermes cron job; these keys are translated in memory so an upgrade can start safely before
+    # Control Center or the operator rewrites config.yaml.
+    legacy = dict(source)
+    if "heartbeat_enabled" not in source and "allow_scheduled_reflection" in legacy:
+        source["heartbeat_enabled"] = legacy["allow_scheduled_reflection"]
+    if "heartbeat_every" not in source and "cron_schedule" in legacy:
+        schedule = str(legacy["cron_schedule"] or "").strip().lower()
+        source["heartbeat_every"] = schedule.removeprefix("every ") or "30m"
+    if "heartbeat_target" not in source and "cron_delivery" in legacy:
+        source["heartbeat_target"] = "none" if legacy["cron_delivery"] == "local" else "last"
+    if "heartbeat_disable_thinking" not in source and "cron_disable_thinking" in legacy:
+        source["heartbeat_disable_thinking"] = legacy["cron_disable_thinking"]
+    if (
+        "educational_allow_heartbeat_tools" not in source
+        and "educational_allow_cron_tools" in legacy
+    ):
+        source["educational_allow_heartbeat_tools"] = legacy["educational_allow_cron_tools"]
+    for retired in (
+        "allow_scheduled_reflection",
+        "cron_schedule",
+        "cron_delivery",
+        "cron_name",
+        "cron_disable_thinking",
+        "manual_run_timeout_seconds",
+        "educational_allow_cron_tools",
+    ):
+        source.pop(retired, None)
     if overrides:
         source = {**source, **overrides}
     known = {item.name for item in fields(AgencyConfig)}
