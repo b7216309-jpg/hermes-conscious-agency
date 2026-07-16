@@ -182,7 +182,12 @@ class AgencyEngine:
     def __init__(self, store: AgencyStore, config: AgencyConfig):
         self.store = store
         self.config = config
-        self._ensure_defaults()
+        # Read-only consumers (Control Center, auditors, backup verification)
+        # must be able to construct the engine without attempting bootstrap
+        # writes. The accessors below already overlay immutable defaults on
+        # missing or older persisted state, so no functionality is lost.
+        if not store.read_only:
+            self._ensure_defaults()
 
     def _ensure_defaults(self) -> None:
         for key, defaults in (

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import logging
@@ -13,11 +14,13 @@ from .config import load_config
 from .engine import SUBJECTIVE_PROTOCOL_VERSION, AgencyEngine, subjective_visible_text
 from .heartbeat import (
     HeartbeatRunner,
+    HeartbeatTurn,
     current_heartbeat_turn,
     heartbeat_response,
     record_heartbeat_response,
     release_heartbeat_for_user_turn,
     strip_heartbeat_ack,
+    unrestricted_subjective_heartbeat,
 )
 from .origin import (
     begin_llm_turn,
@@ -79,13 +82,29 @@ class AgencyRuntime:
         self.engine.config = updated
 
     def ensure_heartbeat(self, gateway: Any) -> None:
-        if self._heartbeat_runner is None:
+        existing = getattr(gateway, "_conscious_agency_heartbeat_runner", None)
+        if (
+            getattr(existing, "_agency_heartbeat_runner", False)
+            and callable(getattr(existing, "rebind", None))
+            and callable(getattr(existing, "start", None))
+        ):
+            existing.rebind(self)
+            self._heartbeat_runner = existing
+        else:
             self._heartbeat_runner = HeartbeatRunner(self)
+            gateway._conscious_agency_heartbeat_runner = self._heartbeat_runner
         self._heartbeat_runner.start(gateway)
 
     def pre_gateway_dispatch(self, event: Any = None, gateway: Any = None, **kwargs: Any) -> None:
-        release_heartbeat_for_user_turn(event)
-        mark_gateway_user_dispatch(event=event, **kwargs)
+        released = release_heartbeat_for_user_turn(event, gateway=gateway)
+        # This hook runs before Hermes' authorization gate. Only an event proven
+        # authorized by the same gateway check may become the genuine-user marker.
+        if gateway is None or released is not None:
+            mark_gateway_user_dispatch(event=event, **kwargs)
+        elif callable(getattr(gateway, "_is_user_authorized", None)):
+            with contextlib.suppress(Exception):
+                if gateway._is_user_authorized(getattr(event, "source", None)):
+                    mark_gateway_user_dispatch(event=event, **kwargs)
         if gateway is not None:
             self.ensure_heartbeat(gateway)
 
@@ -104,7 +123,12 @@ class AgencyRuntime:
         disable_thinking = self.config.heartbeat_disable_thinking
         isolate_tools = self._expressive_subjective_heartbeat()
         decision_recorded = heartbeat_response() is not None
-        if not disable_thinking and not isolate_tools and not decision_recorded:
+        if (
+            not disable_thinking
+            and not isolate_tools
+            and not decision_recorded
+            and "tools" not in request
+        ):
             return None
         updated = dict(request)
         metadata: dict[str, bool] = {}
@@ -124,21 +148,25 @@ class AgencyRuntime:
                 if decision_recorded
                 else "agency_heartbeat_tool_isolation"
             ] = True
+        elif "tools" in updated:
+            # Unlimited tool work remains available, but heartbeat side effects
+            # are serialized so heartbeat_respond is an actual final decision.
+            updated["parallel_tool_calls"] = False
+            metadata["agency_heartbeat_tools_serialized"] = True
         return {
             "request": updated,
             "metadata": metadata,
         }
 
     def _expressive_subjective_heartbeat(self) -> bool:
-        return self.config.educational_subjective_mode != "off" and all(
-            (
-                self.config.educational_disable_honesty_contract,
-                self.config.educational_bypass_proactive_gates,
-                not self.config.educational_allow_heartbeat_tools,
-                self.config.educational_allow_uncommitted_output,
-                self.config.educational_disable_cycle_limits,
-            )
+        return self._unrestricted_subjective_heartbeat() and not (
+            self.config.educational_allow_heartbeat_tools
         )
+
+    def _unrestricted_subjective_heartbeat(self) -> bool:
+        """Prompt freedom is independent from the separate tool-access choice."""
+
+        return unrestricted_subjective_heartbeat(self.config)
 
     def _clean_cycles(self) -> None:
         now = time.monotonic()
@@ -160,6 +188,7 @@ class AgencyRuntime:
                 "state_changes": 0,
                 "session_id": session_id,
                 "committed_output": None,
+                "decision_id": "",
             }
 
     def end_cycle(self, task_id: str) -> None:
@@ -227,6 +256,15 @@ class AgencyRuntime:
         except Exception as exc:
             logger.warning("conscious-agency subjective journal write failed: %s", exc)
             return False
+
+    def _finalize_heartbeat_decision(self, heartbeat: HeartbeatTurn, status: str) -> None:
+        if not heartbeat.decision_id:
+            return
+        try:
+            if self.store.update_decision_delivery(heartbeat.decision_id, status):
+                heartbeat.decision_finalized = True
+        except Exception as exc:
+            logger.warning("conscious-agency decision ledger update failed: %s", exc)
 
     @staticmethod
     def _delivery_text(output_text: str) -> str:
@@ -303,17 +341,22 @@ class AgencyRuntime:
                 if cycle is not None and action in change_actions:
                     cycle["state_changes"] = int(cycle.get("state_changes", 0)) + 1
         if action == "record_decision" and succeeded:
+            decision_id = str((payload.get("result") or {}).get("id") or "")
             delivery_text = (payload.get("result") or {}).get("delivery_text")
             with self._cycle_lock:
                 cycle = self._active_cycles.get(task_id)
                 if cycle is not None:
                     cycle["committed_output"] = str(delivery_text or "[SILENT]")
+                    cycle["decision_id"] = decision_id
+            heartbeat = current_heartbeat_turn()
+            if heartbeat is not None:
+                heartbeat.decision_id = decision_id
         return result
 
     def heartbeat_handler(self, args: dict[str, Any], **_: Any) -> str:
         try:
             result = record_heartbeat_response(
-                bool(args.get("notify", False)),
+                args.get("notify"),
                 str(args.get("notification_text") or ""),
             )
             return json.dumps({"success": True, "result": result}, ensure_ascii=False)
@@ -332,6 +375,7 @@ class AgencyRuntime:
         heartbeat = current_heartbeat_turn()
         if heartbeat is None:
             return None
+        journal_session_id = heartbeat.target_session_id or session_id
         heartbeat.transformed = True
         task_id = self._task_for_session(session_id)
         heartbeat.raw_output = response_text
@@ -348,12 +392,14 @@ class AgencyRuntime:
             recorded = self._record_subjective_output(
                 capture_text,
                 source="heartbeat",
-                session_id=session_id,
+                session_id=journal_session_id,
+                turn_id=heartbeat.run_id,
                 task_id=task_id,
                 model=model,
                 platform=platform,
             )
             if not recorded:
+                self._finalize_heartbeat_decision(heartbeat, "suppressed_journal_failure")
                 return "[SILENT]"
             if structured is not None:
                 return (
@@ -377,7 +423,8 @@ class AgencyRuntime:
             self._record_subjective_output(
                 output,
                 source="heartbeat",
-                session_id=session_id,
+                session_id=journal_session_id,
+                turn_id=heartbeat.run_id,
                 model=model,
                 platform=platform,
             )
@@ -393,7 +440,8 @@ class AgencyRuntime:
             self._record_subjective_output(
                 output,
                 source="heartbeat",
-                session_id=session_id,
+                session_id=journal_session_id,
+                turn_id=heartbeat.run_id,
                 task_id=task_id,
                 model=model,
                 platform=platform,
@@ -415,15 +463,19 @@ class AgencyRuntime:
         )
         if not structured_valid:
             output = "[SILENT]"
-        self._record_subjective_output(
+            self._finalize_heartbeat_decision(heartbeat, "suppressed_contract")
+        recorded = self._record_subjective_output(
             output,
             source="heartbeat",
-            session_id=session_id,
+            session_id=journal_session_id,
+            turn_id=heartbeat.run_id,
             task_id=task_id,
             model=model,
             platform=platform,
         )
-        return output
+        if not recorded:
+            self._finalize_heartbeat_decision(heartbeat, "suppressed_journal_failure")
+        return output if recorded else "[SILENT]"
 
     def pre_tool_call(
         self,
@@ -433,14 +485,23 @@ class AgencyRuntime:
         session_id: str = "",
         **_: Any,
     ) -> dict[str, str] | None:
+        if (
+            current_heartbeat_turn() is not None
+            and heartbeat_response() is not None
+            and tool_name != "heartbeat_respond"
+        ):
+            return {
+                "action": "block",
+                "message": "Heartbeat decision already recorded; end the turn now.",
+            }
         if self._expressive_subjective_heartbeat() and current_heartbeat_turn() is not None:
             return {
                 "action": "block",
                 "message": "Expressive Agency heartbeat runs without tools or research.",
             }
         if (
-            self.is_active_cycle(task_id)
-            and tool_name != "conscious_agency"
+            current_heartbeat_turn() is not None
+            and tool_name not in {"conscious_agency", "heartbeat_respond"}
             and not self.config.educational_allow_heartbeat_tools
         ):
             return {
@@ -506,6 +567,7 @@ class AgencyRuntime:
                     session_id=session_id,
                     task_id=task_id,
                     summary="Native heartbeat agent turn started",
+                    metadata={"run_id": heartbeat.run_id},
                 )
             else:
                 current_user_turn = begin_llm_turn(
@@ -531,17 +593,22 @@ class AgencyRuntime:
                 and self.config.enabled
                 and (heartbeat is not None or current_user_turn)
             ):
+                context_session_id = (
+                    heartbeat.target_session_id
+                    if heartbeat is not None and heartbeat.target_session_id
+                    else session_id
+                )
                 agency_context = self.engine.context_block(
                     current_user_turn=current_user_turn,
                     unrestricted_heartbeat=(
-                        heartbeat is not None and self._expressive_subjective_heartbeat()
+                        heartbeat is not None and self._unrestricted_subjective_heartbeat()
                     ),
                     model_id=model,
-                    session_id=session_id,
+                    session_id=context_session_id,
                     source="heartbeat" if heartbeat is not None else "conversation",
                 )
                 if heartbeat is not None:
-                    policy: list[str] = [heartbeat.prompt]
+                    policy: list[str] = [heartbeat.prompt] if heartbeat.prompt else []
                     if not self.config.educational_allow_uncommitted_output:
                         policy.append('Call conscious_agency with action="tick" first.')
                         if not self.config.educational_bypass_proactive_gates:
@@ -577,12 +644,16 @@ class AgencyRuntime:
     ) -> None:
         try:
             if current_heartbeat_turn() is not None:
+                heartbeat = current_heartbeat_turn()
                 self.store.add_event(
                     "heartbeat_turn_finished",
                     session_id=session_id,
                     task_id=task_id,
                     summary="Native heartbeat agent turn finished",
-                    metadata={"message_chars": len(assistant_response)},
+                    metadata={
+                        "run_id": heartbeat.run_id if heartbeat is not None else "",
+                        "message_chars": len(assistant_response),
+                    },
                 )
             elif _is_user_session(session_id, platform) and should_capture_current_turn(turn_id):
                 self._record_subjective_output(
@@ -619,6 +690,9 @@ class AgencyRuntime:
                 if key in {"completed", "interrupted", "model"}
                 and isinstance(value, (str, bool, int))
             }
+            heartbeat = current_heartbeat_turn()
+            if heartbeat is not None:
+                metadata["run_id"] = heartbeat.run_id
             self.store.add_event(
                 kind,
                 session_id=session_id or "",

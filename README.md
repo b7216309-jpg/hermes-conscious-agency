@@ -5,12 +5,13 @@ Persistent workspace, intentions, reflection, and a gateway-native heartbeat for
 
 The plugin gives the configured Hermes model a small inspectable state beyond recalled facts. It
 can retain a focus, intentions, unresolved questions, observations, reflections, and decisions.
-Its heartbeat can open an internal turn in the latest real Hermes conversation, decide whether
-anything merits attention, remain silent, or deliver one buffered message.
+Its heartbeat can target the latest real Hermes conversation, open one isolated internal work
+session, decide whether anything merits attention, remain silent, or deliver one final message.
 
-Version 1.0 replaces the former Hermes cron job completely. The heartbeat now runs inside the
-gateway, continues the main chat session, preserves the genuine-user activity clock, and does not
-teach the memory plugin that its synthetic poll was a user message.
+Version 1.1 replaces shared-session execution with a fresh disposable Hermes session for every
+heartbeat. The durable chat transcript and genuine-user activity clock are untouched. Durable
+wake claims, a cross-process runner lease, startup cleanup, and an at-most-once delivery ledger
+make process restarts explicit instead of silently repeating uncertain messages.
 
 > This is software state and model behavior, not evidence that a model is conscious, sentient, or
 > emotional. Educational Lab controls can remove that prompt contract for controlled research;
@@ -29,23 +30,38 @@ flowchart LR
     F["HEARTBEAT.md"] --> P
     I["Due intentions"] --> P
     P -->|"empty / not due / busy"| X["Skip without model call"]
-    P -->|"ready"| H["Internal heartbeat turn in main session"]
+    P -->|"ready"| H["Fresh disposable no-delivery session"]
     H --> M["Configured Hermes model"]
     M --> R["heartbeat_respond"]
     R -->|"notify=false"| Q["Audited silence"]
     R -->|"notify=true"| B["Buffered final delivery"]
+    H -->|"hard close + delete"| D["No disposable transcript or Memory session"]
 ```
 
 The scheduler is not a renamed cron. It is attached to the active `GatewayRunner` after startup
-restore and uses Hermes' existing message pipeline. The transcript sees only
-`[Hermes heartbeat poll]`; the effective heartbeat instructions are injected ephemerally by the
-plugin hook. Streaming, interim tool output, reasoning display, and long-running notices are
-suppressed only for that heartbeat turn, so the user receives either one final message or nothing.
+restore and uses Hermes' existing message pipeline. A routing-distinct session sees only
+`[Hermes heartbeat poll]`; effective instructions and Agency state are injected ephemerally. It
+does not clone the user's transcript. The work source uses Hermes' local/CLI tool profile, which
+has no messaging adapter; this prevents streaming, interim tool output, reasoning display, or a
+final answer from leaking to a synthetic Telegram topic. Agency alone commits either one final
+message to the original peer or audited silence. Model reasoning itself stays enabled unless
+`heartbeat_disable_thinking: true` is explicitly configured.
 
 The integration currently uses a guarded compatibility patch around Hermes' gateway startup
 lifecycle because the public plugin API has no gateway-ready service hook. It is tested against
-Hermes Agent 0.18.2. If a future Hermes release changes `GatewayRunner`, the normal inbound hook is
+Hermes Agent 0.18.2 at upstream commit
+`10b6d1a910411f293c9c2422da3b6df6ec66becc`. If a future Hermes release changes `GatewayRunner`, the normal inbound hook is
 a fallback attachment point and the Control Center audit reports missing native integration.
+
+## Compatibility
+
+| Component | Release gate |
+| --- | --- |
+| Hermes Agent | `0.18.2`, upstream `10b6d1a910411f293c9c2422da3b6df6ec66becc` |
+| Consolidating Local Memory | `3.5.0` for exact disposable-session isolation |
+| Python | `3.11`–`3.13` |
+| Storage | SQLite or SQLCipher |
+| OpenClaw reference | audited `349f78776d0bb875463f4858f5826744d93f1240` |
 
 ## What it stores
 
@@ -70,8 +86,9 @@ transcript excerpts may be private; do not commit them.
 
 The implementation follows the current MIT-licensed OpenClaw heartbeat design where it fits
 Hermes: a deterministic phase, active hours, empty-file preflight, periodic tasks, wake intents,
-centralized cooldown, flood protection, `HEARTBEAT_OK` suppression, main-session continuity, and a
-structured response tool. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+centralized cooldown, flood protection, `HEARTBEAT_OK` suppression, target-session routing, and a
+structured response tool. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md). The current parity
+audit uses OpenClaw commit `349f78776d0bb875463f4858f5826744d93f1240`.
 
 ### Scheduling
 
@@ -83,7 +100,8 @@ structured response tool. See [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 - Manual wakes bypass interval cooldown but still wait for the gateway to become available.
 - Event wakes use the next-due and minimum-spacing gates.
 - A rolling flood guard prevents tool or event feedback loops.
-- Scheduler state and task last-run times survive gateway restarts.
+- Scheduler state, task last-run times, and pending/claimed wakes survive gateway restarts.
+- One OS-level lease permits only one scheduler process for a Hermes home.
 
 ### `HEARTBEAT.md`
 
@@ -126,12 +144,16 @@ skips the call.
   acknowledgement-adjacent text are suppressed.
 - `heartbeat_target: last` routes one final response to the newest available external conversation.
 - `heartbeat_target: none` still runs and journals the turn but sends nothing externally.
+- Transport state is committed as `pending`, `sending`, `delivered`, `ambiguous`, `silent`,
+  `suppressed`, `interrupted`, or `failed`. A crash after send begins is marked ambiguous and is
+  not automatically resent.
 
-Heartbeat turns reuse the real session transcript but restore its `updated_at` value afterward.
-They therefore retain conversational continuity without pretending the user just contacted Hermes.
-If a genuine platform message arrives mid-heartbeat, the user turn takes priority: heartbeat
-context is detached before the queued turn runs, the heartbeat is recorded as interrupted, its
-delivery path is discarded, and the new genuine-user activity time is preserved.
+Heartbeat turns do not reuse or modify the real transcript. The target session ID is used for
+Agency state, routing, and the final adapter send; optional longitudinal continuity comes only from
+the bounded same-model subjective journal. The disposable session is hard-closed and deleted after
+the model turn. If a genuine authorized platform message arrives before the send commit point, the
+user turn takes priority: the heartbeat is interrupted, its delivery path is discarded, and the
+real turn proceeds on its normal session.
 
 ## Install
 
@@ -151,9 +173,10 @@ The installer atomically replaces:
 ~/.hermes/plugins/conscious-agency/
 ```
 
-It enables the plugin without tool-override permission, creates a comments-only heartbeat template
-when needed, migrates legacy configuration keys, and removes only the old Agency cron recorded in
-the Agency database. Unrelated Hermes cron jobs are never touched.
+On a fresh install it enables the plugin without tool-override permission. On an update it
+preserves the operator's current enablement and grant settings. It creates a comments-only
+heartbeat template when needed, migrates legacy configuration keys, and removes only the old
+Agency cron recorded in the Agency database. Unrelated Hermes cron jobs are never touched.
 
 Useful installer options:
 
@@ -201,7 +224,6 @@ plugins:
     heartbeat_active_hours_end: ""
     heartbeat_ack_max_chars: 300
     heartbeat_timeout_seconds: 600
-    heartbeat_max_iterations: 8
     heartbeat_min_spacing_seconds: 30
     heartbeat_flood_window_seconds: 60
     heartbeat_flood_threshold: 5
@@ -235,15 +257,32 @@ Restart a running gateway after configuration changes. Unknown keys, invalid typ
 paths, malformed durations, invalid timezones, partial active-hour windows, and out-of-range limits
 are rejected.
 
+A thinking-enabled 10-minute research cadence changes only these ordinary heartbeat settings:
+
+```yaml
+plugins:
+  conscious-agency:
+    heartbeat_enabled: true
+    heartbeat_every: "10m"
+    heartbeat_target: "last"
+    heartbeat_timeout_seconds: 600
+    heartbeat_disable_thinking: false
+```
+
+Put the behavior directive in `~/.hermes/HEARTBEAT.md`; keeping it short leaves the model room to
+choose. For example: `Use this wake as your own turn.` Educational overrides remain separate Lab
+choices and are never implied by the interval.
+
 `heartbeat_disable_thinking: true` merges
 `chat_template_kwargs.enable_thinking: false` only into native heartbeat provider requests. Normal
 chats, compression, unrelated cron jobs, and other plugins are unchanged.
 
-The 600-second wall-clock timeout is independent from `heartbeat_max_iterations`, which limits
-heartbeat-only tool/API rounds. After `heartbeat_respond` accepts its first valid decision,
-subsequent model calls receive no tool schemas and cannot replace that decision. The plugin does
-not impose a heartbeat output-token cap. These controls do not change normal Hermes conversation
-budgets or disable model thinking.
+The 600-second wall-clock timeout bounds one complete heartbeat so a dead endpoint cannot occupy
+the scheduler forever. It is not a token, iteration, tool-call, or output-length budget. The plugin
+does not impose any of those caps. After `heartbeat_respond` accepts its first valid decision,
+subsequent model calls receive no tool schemas and cannot replace that decision. Provider/model
+limits still apply, and normal Hermes conversations keep their own configuration. Thinking remains
+enabled by default.
 
 ## Conservative and Educational Lab modes
 
@@ -294,10 +333,12 @@ Operator CLI, slash commands, and Control Center remain the authority surfaces.
 
 ## Memory-plugin interaction
 
-The native heartbeat is marked internal before it enters the gateway. The consolidating memory
-plugin therefore excludes the synthetic poll and its response from user episodes, extraction, and
-prefetch. This prevents self-generated heartbeat text from becoming a false user memory while the
-shared transcript still provides conversational context to Hermes.
+The native heartbeat uses Hermes' adapter-free local route with an exact
+`agency-heartbeat-<32 hex>` thread marker before it enters the gateway. Consolidating Local Memory
+3.5 recognizes only that exact form: explicit reads remain
+available, but it creates no Memory session or worker and excludes the poll/response from prefetch,
+compression, mirroring, episodes, summaries, and extraction. Agency then hard-closes the cached
+agent and deletes the disposable Hermes routing row and transcript.
 
 ## Test and verify
 
@@ -309,10 +350,19 @@ python3 -m pytest -q
 ```
 
 The suite covers configuration and legacy migration, deterministic scheduling, active hours,
-task parsing, wake coalescing, cooldown/flood behavior, acknowledgement stripping, main-session
-routing, buffered delivery, activity-time restoration, structured fail-closed output, provider
-request isolation, heartbeat-only tool-loop boundaries, interrupted-run recovery, encrypted-store
-behavior, real-user interruption handoff, and unrelated-cron isolation.
+task parsing, wake coalescing, cooldown/flood behavior, acknowledgement stripping, target-session
+routing, disposable session cleanup, hard agent-resource shutdown, stale-session reconciliation,
+claimed-wake recovery, the process lease, at-most-once delivery states, structured fail-closed
+output, provider request isolation, interrupted-run recovery, encrypted-store behavior, real-user
+interruption handoff, and unrelated-cron isolation.
+
+The release gate also runs the lifecycle tests against a current Hermes checkout:
+
+```bash
+HERMES_UPSTREAM_COMPAT=1 \
+PYTHONPATH=/path/to/hermes-agent:$PWD \
+python3 -m pytest tests/test_hermes_upstream.py -q
+```
 
 For a live check:
 
@@ -340,10 +390,9 @@ memory database counts. A silent heartbeat is a valid result.
   Control Center reports `legacy_agency_cron_absent`.
 - **Local Qwen spends time reasoning:** set `heartbeat_disable_thinking: true`; the endpoint must
   support the OpenAI-compatible `chat_template_kwargs` extension.
-- **A local model repeats tools:** lower `heartbeat_max_iterations`; this limit is scoped to
-  heartbeat turns and thinking can remain enabled. The plugin intentionally does not impose an
-  output-token cap, so token-level repetition remains bounded by the endpoint and wall-clock
-  timeout.
+- **A local model repeats tools:** inspect the model's tool-call support and gateway logs. The
+  plugin deliberately has no tool-call or iteration cap; the wall-clock timeout will end a stuck
+  heartbeat without changing model thinking or truncating a valid response.
 - **After a Hermes upgrade:** run the test suite and Control Center native-heartbeat audit before
   relying on scheduled delivery.
 

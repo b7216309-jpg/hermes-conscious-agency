@@ -260,3 +260,16 @@ def test_intention_due_dates_are_normalized_updated_cleared_and_validated(config
 
     with pytest.raises(ValueError, match="valid ISO-8601"):
         store.add_intention("Bad deadline", due_at="tomorrow-ish")
+
+
+def test_read_only_store_never_initializes_or_writes(config):
+    writable = AgencyStore(config)
+    writable.set_meta("proof", {"value": 7})
+    before = config.db_path.stat().st_mtime_ns
+
+    read_only = AgencyStore(config, read_only=True)
+    assert read_only.get_meta("proof") == {"value": 7}
+    with pytest.raises(read_only._driver.OperationalError):
+        read_only.set_meta("forbidden", True)
+
+    assert config.db_path.stat().st_mtime_ns == before

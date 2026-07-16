@@ -2,6 +2,33 @@
 
 All notable changes are documented here.
 
+## 1.1.0 - 2026-07-17
+
+- Replaced shared-session heartbeat execution with a fresh routing-distinct disposable Hermes
+  session for every run; the durable user transcript and activity clock are never mutated.
+- Removed an incorrect `gateway_session_id` metadata pin that current Hermes reserves for async
+  delegation and therefore used to reject the synthetic heartbeat before any model turn.
+- Run the disposable model turn through Hermes' adapter-free local/CLI route, preventing streaming
+  or progress output from targeting the synthetic marker as a Telegram topic; only Agency performs
+  the single final delivery to the original peer.
+- Hard-close cached agent, tool, and MemoryProvider resources before evicting a disposable session,
+  then delete both its routing entry and SQLite transcript.
+- Added exact startup cleanup for routed and orphaned disposable heartbeat sessions left by a
+  crash, with matching Memory 3.5 session isolation.
+- Added a cross-process runner lease, durable pending/claimed wake handoff, crash recovery before
+  model execution, and status visibility for claimed-wake ownership.
+- Added an at-most-once delivery ledger with explicit pending, sending, delivered, ambiguous,
+  silent, suppressed, interrupted, and failed outcomes so a restart cannot blindly resend an
+  uncertain Telegram delivery.
+- Made genuine authorized user traffic preempt a heartbeat before its send commit point while
+  unauthorized traffic cannot cancel a run.
+- Removed the heartbeat tool/API iteration setting entirely. Heartbeats have no plugin token,
+  iteration, tool-call, or output-length cap; only the configured wall-clock timeout remains.
+- Added hot-reload rebinding, live gateway ownership diagnostics, current-upstream Hermes lifecycle
+  tests, and expanded scheduling/recovery/concurrency coverage.
+- Made repeated installs preserve existing plugin enablement/grant settings instead of re-enabling
+  an already loaded plugin and returning a false tool-override error.
+
 ## 1.0.0 - 2026-07-16
 
 - Replaced the plugin-owned Hermes cron with a gateway-native heartbeat in the latest external

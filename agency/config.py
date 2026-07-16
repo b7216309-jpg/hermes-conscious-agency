@@ -7,12 +7,31 @@ the package tolerant of older or experimental Hermes builds.
 
 from __future__ import annotations
 
+import math
 import os
 import re
 from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+CONFIG_NUMERIC_BOUNDS: dict[str, tuple[float | int, float | int]] = {
+    "daily_message_limit": (0, 1_000_000),
+    "cooldown_hours": (0.0, 87_600.0),
+    "minimum_user_silence_hours": (0.0, 87_600.0),
+    "maximum_message_chars": (80, 4_000),
+    "context_char_limit": (500, 12_000),
+    "excerpt_char_limit": (0, 4_000),
+    "event_retention_days": (1, 36_500),
+    "maximum_events": (100, 1_000_000),
+    "maximum_reflections_per_tick": (0, 5),
+    "maximum_state_changes_per_tick": (0, 10),
+    "heartbeat_ack_max_chars": (0, 4_000),
+    "heartbeat_timeout_seconds": (30, 3_600),
+    "heartbeat_min_spacing_seconds": (0, 3_600),
+    "heartbeat_flood_window_seconds": (1, 86_400),
+    "heartbeat_flood_threshold": (1, 100),
+}
 
 
 def hermes_home() -> Path:
@@ -49,8 +68,6 @@ class AgencyConfig:
     heartbeat_active_hours_end: str = ""
     heartbeat_ack_max_chars: int = 300
     heartbeat_timeout_seconds: int = 600
-    # Heartbeat-only generation boundaries. They do not alter normal Hermes chats.
-    heartbeat_max_iterations: int = 8
     heartbeat_min_spacing_seconds: int = 30
     heartbeat_flood_window_seconds: int = 60
     heartbeat_flood_threshold: int = 5
@@ -97,7 +114,6 @@ class AgencyConfig:
             "maximum_state_changes_per_tick",
             "heartbeat_ack_max_chars",
             "heartbeat_timeout_seconds",
-            "heartbeat_max_iterations",
             "heartbeat_min_spacing_seconds",
             "heartbeat_flood_window_seconds",
             "heartbeat_flood_threshold",
@@ -123,7 +139,11 @@ class AgencyConfig:
                 raise ValueError(f"{name} must be a non-empty string")
         for name in ("cooldown_hours", "minimum_user_silence_hours"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, (int, float)):
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(float(value))
+            ):
                 raise ValueError(f"{name} must be a number")
         if not re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*", self.database_key_env):
             raise ValueError("database_key_env must be a valid environment variable name")
@@ -138,34 +158,10 @@ class AgencyConfig:
             raise ValueError("heartbeat_target must be last or none")
         if self.educational_subjective_mode not in {"off", "cold", "continuity"}:
             raise ValueError("educational_subjective_mode must be off, cold, or continuity")
-        if self.daily_message_limit < 0:
-            raise ValueError("daily_message_limit must be non-negative")
-        if self.cooldown_hours < 0 or self.minimum_user_silence_hours < 0:
-            raise ValueError("cooldown and silence periods must be non-negative")
-        if not 80 <= self.maximum_message_chars <= 4000:
-            raise ValueError("maximum_message_chars must be between 80 and 4000")
-        if not 500 <= self.context_char_limit <= 12000:
-            raise ValueError("context_char_limit must be between 500 and 12000")
-        if not 0 <= self.excerpt_char_limit <= 4000:
-            raise ValueError("excerpt_char_limit must be between 0 and 4000")
-        if self.event_retention_days < 1 or self.maximum_events < 100:
-            raise ValueError("event retention must keep at least 1 day and 100 events")
-        if not 0 <= self.maximum_reflections_per_tick <= 5:
-            raise ValueError("maximum_reflections_per_tick must be between 0 and 5")
-        if not 0 <= self.maximum_state_changes_per_tick <= 10:
-            raise ValueError("maximum_state_changes_per_tick must be between 0 and 10")
-        if not 0 <= self.heartbeat_ack_max_chars <= 4000:
-            raise ValueError("heartbeat_ack_max_chars must be between 0 and 4000")
-        if not 30 <= self.heartbeat_timeout_seconds <= 3600:
-            raise ValueError("heartbeat_timeout_seconds must be between 30 and 3600")
-        if not 1 <= self.heartbeat_max_iterations <= 90:
-            raise ValueError("heartbeat_max_iterations must be between 1 and 90")
-        if not 0 <= self.heartbeat_min_spacing_seconds <= 3600:
-            raise ValueError("heartbeat_min_spacing_seconds must be between 0 and 3600")
-        if not 1 <= self.heartbeat_flood_window_seconds <= 86400:
-            raise ValueError("heartbeat_flood_window_seconds must be between 1 and 86400")
-        if not 1 <= self.heartbeat_flood_threshold <= 100:
-            raise ValueError("heartbeat_flood_threshold must be between 1 and 100")
+        for name, (minimum, maximum) in CONFIG_NUMERIC_BOUNDS.items():
+            value = getattr(self, name)
+            if not minimum <= value <= maximum:
+                raise ValueError(f"{name} must be between {minimum} and {maximum}")
         _parse_duration(self.heartbeat_every)
         _parse_clock(self.quiet_hours_start)
         _parse_clock(self.quiet_hours_end)
@@ -274,6 +270,7 @@ def load_config(path: Path | None = None, overrides: dict[str, Any] | None = Non
         "cron_disable_thinking",
         "manual_run_timeout_seconds",
         "educational_allow_cron_tools",
+        "heartbeat_max_iterations",
     ):
         source.pop(retired, None)
     if overrides:

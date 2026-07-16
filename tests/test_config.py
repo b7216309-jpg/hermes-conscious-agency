@@ -69,7 +69,8 @@ def test_migrates_retired_cron_configuration(tmp_path):
         "    cron_schedule: every 1h\n"
         "    cron_delivery: local\n"
         "    cron_disable_thinking: true\n"
-        "    educational_allow_cron_tools: true\n",
+        "    educational_allow_cron_tools: true\n"
+        "    heartbeat_max_iterations: 8\n",
         encoding="utf-8",
     )
     migrated = load_config(path)
@@ -78,6 +79,7 @@ def test_migrates_retired_cron_configuration(tmp_path):
     assert migrated.heartbeat_target == "none"
     assert migrated.heartbeat_disable_thinking is True
     assert migrated.educational_allow_heartbeat_tools is True
+    assert not hasattr(migrated, "heartbeat_max_iterations")
 
 
 def test_validates_heartbeat_schedule_and_active_hours():
@@ -90,8 +92,6 @@ def test_validates_heartbeat_schedule_and_active_hours():
         AgencyConfig(heartbeat_every="often").validate()
     with pytest.raises(ValueError, match="require both"):
         AgencyConfig(heartbeat_active_hours_start="08:00").validate()
-    with pytest.raises(ValueError, match="heartbeat_max_iterations"):
-        AgencyConfig(heartbeat_max_iterations=0).validate()
 
 
 @pytest.mark.parametrize("value", ["25:00", "12:60", "bad", ""])
@@ -105,6 +105,12 @@ def test_rejects_unsafe_ranges():
         AgencyConfig(daily_message_limit=-1).validate()
     with pytest.raises(ValueError):
         AgencyConfig(maximum_message_chars=50).validate()
+    with pytest.raises(ValueError, match="must be a number"):
+        AgencyConfig(cooldown_hours=float("nan")).validate()
+    with pytest.raises(ValueError, match="event_retention_days"):
+        AgencyConfig(event_retention_days=10**100).validate()
+    with pytest.raises(ValueError, match="maximum_events"):
+        AgencyConfig(maximum_events=10**100).validate()
 
 
 def test_rejects_string_booleans_and_malformed_yaml(tmp_path):

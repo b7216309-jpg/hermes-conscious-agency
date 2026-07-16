@@ -41,6 +41,7 @@ def main() -> int:
     plugins_dir.mkdir(parents=True, exist_ok=True)
     stage = plugins_dir / ".conscious-agency.installing"
     backup = plugins_dir / ".conscious-agency.backup"
+    updating_existing = destination.exists() or backup.exists()
     if backup.exists() and not destination.exists():
         os.replace(backup, destination)
     elif backup.exists():
@@ -85,7 +86,9 @@ def main() -> int:
         print(f"Created comment-only heartbeat template at {heartbeat_file}")
     if not args.no_enable:
         hermes = _hermes_executable()
-        if hermes:
+        if updating_existing:
+            print("Existing install updated; preserving its enablement and grant settings.")
+        elif hermes:
             completed = subprocess.run(
                 [hermes, "plugins", "enable", "conscious-agency", "--no-allow-tool-override"],
                 check=False,

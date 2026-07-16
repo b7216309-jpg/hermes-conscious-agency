@@ -34,16 +34,22 @@ class AgencyStore:
     SQLite WAL and busy_timeout cover separate Hermes processes.
     """
 
-    def __init__(self, config: AgencyConfig):
+    def __init__(self, config: AgencyConfig, *, read_only: bool = False):
         self.config = config
         self.path = config.db_path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        if os.name != "nt":
-            with suppress(OSError):
-                os.chmod(self.path.parent, 0o700)
+        self.read_only = bool(read_only)
+        if self.read_only:
+            if not self.path.is_file():
+                raise FileNotFoundError(self.path)
+        else:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            if os.name != "nt":
+                with suppress(OSError):
+                    os.chmod(self.path.parent, 0o700)
         self._lock = threading.RLock()
         self._driver = self._select_driver()
-        self._initialize()
+        if not self.read_only:
+            self._initialize()
 
     def _select_driver(self):
         if not self.config.database_encryption:
@@ -65,7 +71,14 @@ class AgencyStore:
 
     @contextmanager
     def connection(self) -> Iterator[Any]:
-        conn = self._driver.connect(str(self.path), timeout=10.0)
+        if self.read_only:
+            conn = self._driver.connect(
+                self.path.resolve().as_uri() + "?mode=ro",
+                uri=True,
+                timeout=10.0,
+            )
+        else:
+            conn = self._driver.connect(str(self.path), timeout=10.0)
         try:
             if self.config.database_encryption:
                 secret = os.environ[self.config.database_key_env].encode("utf-8")
@@ -74,11 +87,16 @@ class AgencyStore:
                 conn.execute("PRAGMA cipher_memory_security = ON")
             conn.execute("PRAGMA busy_timeout = 10000")
             conn.execute("PRAGMA foreign_keys = ON")
-            conn.execute("PRAGMA journal_mode = WAL")
+            if self.read_only:
+                conn.execute("PRAGMA query_only = ON")
+            else:
+                conn.execute("PRAGMA journal_mode = WAL")
             yield conn
-            conn.commit()
+            if not self.read_only:
+                conn.commit()
         except Exception:
-            conn.rollback()
+            if not self.read_only:
+                conn.rollback()
             raise
         finally:
             conn.close()
@@ -560,10 +578,24 @@ class AgencyStore:
         )
         return [dict(zip(keys, row, strict=True)) for row in rows]
 
+    def update_decision_delivery(self, decision_id: str, status: str) -> bool:
+        clean_id = str(decision_id or "").strip()
+        clean_status = str(status or "").strip()[:80]
+        if not clean_id or not clean_status:
+            raise ValueError("decision id and delivery status are required")
+        with self._lock, self.connection() as conn:
+            changed = conn.execute(
+                "UPDATE decisions SET delivery_status = ? WHERE id = ?",
+                (clean_status, clean_id),
+            ).rowcount
+        return bool(changed)
+
     def proactive_count_since(self, since: datetime) -> int:
         with self.connection() as conn:
             row = conn.execute(
-                "SELECT COUNT(*) FROM decisions WHERE action = 'speak' AND created_at >= ?",
+                """SELECT COUNT(*) FROM decisions
+                   WHERE action = 'speak' AND delivery_status = 'delivered'
+                         AND created_at >= ?""",
                 (since.astimezone(UTC).isoformat(),),
             ).fetchone()
         return int(row[0])
@@ -572,7 +604,9 @@ class AgencyStore:
         with self.connection() as conn:
             row = conn.execute(
                 """SELECT id, created_at, action, reason, intention_id, message, delivery_status
-                   FROM decisions WHERE action = 'speak' ORDER BY created_at DESC LIMIT 1"""
+                   FROM decisions
+                   WHERE action = 'speak' AND delivery_status = 'delivered'
+                   ORDER BY created_at DESC LIMIT 1"""
             ).fetchone()
         if row is None:
             return None

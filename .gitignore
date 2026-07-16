@@ -9,6 +9,7 @@ dist/
 *.egg-info/
 .venv/
 .env
+uv.lock
 *.db
 *.db-shm
 *.db-wal

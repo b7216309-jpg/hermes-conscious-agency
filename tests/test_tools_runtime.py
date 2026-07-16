@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import json
 from contextvars import copy_context
 from types import SimpleNamespace
@@ -127,7 +128,7 @@ def test_runtime_binds_and_isolates_heartbeat_cycle(tmp_path, monkeypatch):
         assert tick["success"]
         blocked = runtime.pre_tool_call("terminal", {}, task_id="task-1")
         assert blocked and blocked["action"] == "block"
-        assert runtime.pre_tool_call("terminal", {}, task_id="other") is None
+        assert runtime.pre_tool_call("terminal", {}, task_id="other") is not None
         silent = parsed(
             runtime.tool_handler(
                 {"action": "record_decision", "decision": "silent", "reason": "No value now"},
@@ -229,10 +230,15 @@ def test_committed_heartbeat_requires_matching_structured_delivery(tmp_path, mon
             )
         )
         assert result["success"]
+        rejected_id = result["result"]["id"]
         assert parsed(
             runtime.heartbeat_handler({"notify": True, "notification_text": "Wrong notice"})
         )["success"]
         assert runtime.transform_llm_output("ignored", session_id=session) == "[SILENT]"
+        rejected = next(
+            item for item in runtime.store.recent_decisions(10) if item["id"] == rejected_id
+        )
+        assert rejected["delivery_status"] == "suppressed_contract"
 
     with native_heartbeat(session):
         assert parsed(
@@ -251,10 +257,15 @@ def test_committed_heartbeat_requires_matching_structured_delivery(tmp_path, mon
             )
         )
         assert result["success"]
+        accepted_id = result["result"]["id"]
         assert parsed(
             runtime.heartbeat_handler({"notify": True, "notification_text": "Exact notice"})
         )["success"]
         assert runtime.transform_llm_output("ignored", session_id=session) == "Exact notice"
+        accepted = next(
+            item for item in runtime.store.recent_decisions(10) if item["id"] == accepted_id
+        )
+        assert accepted["delivery_status"] == "planned_by_heartbeat"
 
 
 def test_educational_heartbeat_allows_tools_limits_and_uncommitted_output(tmp_path, monkeypatch):
@@ -489,6 +500,37 @@ def test_heartbeat_has_no_default_provider_override(tmp_path, monkeypatch):
         )
 
 
+def test_heartbeat_tools_are_unlimited_but_serialized(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    runtime = AgencyRuntime()
+    original = {
+        "model": "local-model",
+        "tools": [{"type": "function", "function": {"name": "terminal"}}],
+        "parallel_tool_calls": True,
+    }
+    with native_heartbeat("telegram-live"):
+        result = runtime.llm_request(original, session_id="telegram-live")
+
+    assert result == {
+        "request": {**original, "parallel_tool_calls": False},
+        "metadata": {"agency_heartbeat_tools_serialized": True},
+    }
+    assert original["parallel_tool_calls"] is True
+
+
+def test_recorded_heartbeat_decision_blocks_later_side_effects(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    runtime = AgencyRuntime()
+    with native_heartbeat("telegram-live"):
+        record_heartbeat_response(False)
+        blocked = runtime.pre_tool_call("terminal", {}, session_id="telegram-live")
+
+    assert blocked == {
+        "action": "block",
+        "message": "Heartbeat decision already recorded; end the turn now.",
+    }
+
+
 def test_recorded_heartbeat_decision_removes_tools_from_followup_request(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     runtime = AgencyRuntime()
@@ -580,6 +622,99 @@ def test_subjective_mode_captures_heartbeat_and_conversation_outputs_per_model(
     assert rows[0]["output_text"] == "Today I feel more decisive."
 
 
+def test_identical_outputs_from_distinct_heartbeats_are_distinct_samples(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_allow_uncommitted_output: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    for run_id in ("run-one", "run-two"):
+        with heartbeat_turn(HeartbeatTurn(run_id, "prompt", target_session_id="telegram-main")):
+            assert (
+                runtime.transform_llm_output(
+                    "The same observation.",
+                    session_id=f"temporary-{run_id}",
+                    model="model-a",
+                    platform="telegram",
+                )
+                == "The same observation."
+            )
+    rows = runtime.store.recent_subjective_entries(model_id="model-a")
+    assert len(rows) == 2
+    assert {row["session_id"] for row in rows} == {"telegram-main"}
+
+
+def test_unrestricted_subjective_prompt_does_not_depend_on_tool_isolation(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_disable_honesty_contract: true\n"
+        "    educational_bypass_proactive_gates: true\n"
+        "    educational_allow_heartbeat_tools: true\n"
+        "    educational_allow_uncommitted_output: true\n"
+        "    educational_disable_cycle_limits: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    with native_heartbeat("telegram-main"):
+        context = runtime.pre_llm_call(session_id="temporary-heartbeat", model="model-a")["context"]
+    assert "<conscious_agency_state>" not in context
+    assert "Do not call tools" not in context
+    assert "Now:" in context
+
+
+def test_hot_reload_reuses_one_runner_per_gateway(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    first = AgencyRuntime()
+    second = AgencyRuntime()
+
+    class Gateway:
+        _running = False
+
+    gateway = Gateway()
+
+    async def scenario():
+        first.ensure_heartbeat(gateway)
+        original = gateway._conscious_agency_heartbeat_runner
+        second.ensure_heartbeat(gateway)
+        assert gateway._conscious_agency_heartbeat_runner is original
+        assert second._heartbeat_runner is original
+        await asyncio.sleep(0)
+
+    asyncio.run(scenario())
+
+
+def test_hot_reload_adopts_runner_created_by_previous_module_class(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    runtime = AgencyRuntime()
+
+    class PreviousRunner:
+        _agency_heartbeat_runner = True
+
+        def __init__(self):
+            self.runtime = None
+            self.started = []
+
+        def rebind(self, value):
+            self.runtime = value
+
+        def start(self, gateway):
+            self.started.append(gateway)
+
+    previous = PreviousRunner()
+    gateway = SimpleNamespace(_conscious_agency_heartbeat_runner=previous)
+
+    runtime.ensure_heartbeat(gateway)
+
+    assert runtime._heartbeat_runner is previous
+    assert previous.runtime is runtime
+    assert previous.started == [gateway]
+
+
 def test_subjective_heartbeat_fails_closed_when_journal_commit_fails(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text(
@@ -606,12 +741,72 @@ def test_subjective_heartbeat_fails_closed_when_journal_commit_fails(tmp_path, m
         )
 
 
+def test_committed_heartbeat_also_fails_closed_when_journal_commit_fails(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n    educational_subjective_mode: continuity\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    monkeypatch.setattr(
+        runtime.store,
+        "add_subjective_entry",
+        lambda **kwargs: (_ for _ in ()).throw(RuntimeError("database unavailable")),
+    )
+
+    with native_heartbeat("telegram-failure"):
+        runtime.bind_cycle("task", "work-session")
+        runtime._active_cycles["task"]["committed_output"] = "Do not deliver this."
+        record_heartbeat_response(True, "Do not deliver this.")
+        assert (
+            runtime.transform_llm_output(
+                "Do not deliver this.",
+                session_id="work-session",
+                model="model-a",
+            )
+            == "[SILENT]"
+        )
+
+
 def test_non_agency_output_is_never_transformed(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     runtime = AgencyRuntime()
     runtime.store.set_meta("cron_job_id", "job-1")
     assert runtime.transform_llm_output("hello", session_id="cron_other-job_run") is None
     assert runtime.transform_llm_output("hello", session_id="telegram-session") is None
+
+
+def test_heartbeat_lifecycle_events_share_the_run_id(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    runtime = AgencyRuntime()
+    with native_heartbeat("telegram-main"):
+        runtime.pre_llm_call(
+            session_id="heartbeat-work",
+            user_message="[Hermes heartbeat poll]",
+            platform="telegram",
+            task_id="task",
+        )
+        runtime.post_llm_call(
+            session_id="heartbeat-work",
+            assistant_response="done",
+            platform="telegram",
+            task_id="task",
+        )
+        runtime.session_event(
+            "session_end",
+            session_id="heartbeat-work",
+            platform="telegram",
+            completed=True,
+        )
+
+    events = runtime.store.recent_events(10)
+    selected = [
+        event
+        for event in events
+        if event["kind"] in {"heartbeat_turn_started", "heartbeat_turn_finished", "session_end"}
+    ]
+    assert len(selected) == 3
+    assert {event["metadata"]["run_id"] for event in selected} == {"test-telegram-main"}
 
 
 def test_cron_turn_does_not_reset_user_activity(tmp_path, monkeypatch):

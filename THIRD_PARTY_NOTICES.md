@@ -7,7 +7,7 @@ guard, `HEARTBEAT_OK` handling, comment-only preflight, and YAML-like periodic-t
 this project are adapted from the OpenClaw heartbeat implementation.
 
 - Project: https://github.com/openclaw/openclaw
-- Reference revision: `c11d112b63cb1e4a299c6f9cf6f070b63655086b`
+- Reference revision audited: `349f78776d0bb875463f4858f5826744d93f1240`
 - License: MIT
 - Copyright: OpenClaw Foundation (2026)
 

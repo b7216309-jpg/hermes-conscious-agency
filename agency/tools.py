@@ -42,10 +42,6 @@ def handle_agency(engine: AgencyEngine, args: dict[str, Any], **kwargs: Any) -> 
                     "active_intentions": engine.store.intention_status_counts()["active"],
                 }
             )
-        if action == "snapshot":
-            return _result(engine.snapshot())
-        if action == "recent_events":
-            return _result(engine.store.recent_events(limit))
         if action == "list_intentions":
             items = engine.store.list_intentions(str(args.get("status") or "active"), limit)
             return _result([_intention(item) for item in items])

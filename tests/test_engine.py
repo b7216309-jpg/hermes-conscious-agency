@@ -57,6 +57,19 @@ def test_startup_replaces_removed_control_signal_default(config):
     ]
 
 
+def test_read_only_engine_construction_and_snapshot_never_bootstrap_write(config):
+    writable = AgencyStore(config)
+    writable.set_meta("workspace", {"focus": "Inspect without mutation"})
+
+    read_only = AgencyStore(config, read_only=True)
+    engine = AgencyEngine(read_only, config)
+
+    assert engine.workspace()["focus"] == "Inspect without mutation"
+    snapshot = engine.snapshot()
+    assert snapshot["runtime"]["paused"] is False
+    assert snapshot["self_model"]["identity"]
+
+
 def test_reflection_and_speaking_have_independent_gates(config_factory):
     config = config_factory(allow_proactive_messages=False, heartbeat_enabled=True)
     engine = AgencyEngine(AgencyStore(config), config)
@@ -86,6 +99,10 @@ def test_tick_and_message_enforce_budget_and_cooldown(config):
         now=now,
     )
     assert decision["delivery_text"].startswith("Want")
+    # Planning alone must not consume a cooldown/daily slot; only a confirmed
+    # adapter delivery counts as a proactive message.
+    assert engine.evaluate_tick(now + timedelta(minutes=5))["eligible"]
+    assert engine.store.update_decision_delivery(decision["id"], "delivered")
     blocked = engine.evaluate_tick(now + timedelta(minutes=5))
     assert not blocked["eligible"]
     assert "cooldown_active" in blocked["blocked_by"]

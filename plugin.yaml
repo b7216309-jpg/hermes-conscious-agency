@@ -1,5 +1,5 @@
 name: conscious-agency
-version: "1.0.0"
+version: "1.1.0"
 description: "Persistent agency plus an opt-in per-model longitudinal subjectivity experiment for Hermes Agent."
 author: "b7216309-jpg"
 provides_tools:
