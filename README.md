@@ -8,7 +8,7 @@ workspace describing what it is focused on, what it intends to revisit, what rem
 and what it learned from prior turns. An optional scheduled cycle lets the configured Hermes model
 reflect in silence and, when every hard gate passes, send a concise proactive message.
 
-Version 0.5.0 makes the Educational Lab experiment state-first instead of prompt-first. The model
+Version 0.5.1 keeps the Educational Lab experiment state-first instead of prompt-first. The model
 receives compact persistent state and, in continuity mode, at most 600 characters from an earlier
 same-model, same-source session. The protocol no longer supplies an emotion menu, a service target,
 or fake drive values. Conversation and cron traces stay separate, and unrelated Hermes cron jobs
@@ -601,7 +601,7 @@ and Hermes surface registration.
 
 ## Status
 
-Version `0.5.0` is a bounded, time-aware agency product with a default-off, state-first
+Version `0.5.1` is a bounded, time-aware agency product with a default-off, state-first
 longitudinal experiment. The stable scheduler contract still has one job, one persistent store, one
 delivery path, and one operator pause. Experimental behavior is removed by setting
 `educational_subjective_mode: off`; existing journal rows are preserved until the operator deletes

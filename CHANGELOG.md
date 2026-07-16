@@ -2,6 +2,15 @@
 
 All notable changes are documented here.
 
+## 0.5.1 - 2026-07-16
+
+- Removed the import-time default cron prompt constant; callers and tests now build the prompt from
+  the effective configuration through the single supported `cron_prompt()` path.
+- Removed the unused `pytest-cov` development dependency and moved the existing PyYAML requirement
+  from the development extra to runtime metadata, where the configuration loader actually needs it.
+- Kept the database schema, Hermes surface, cron contract, state-first protocol 1.4, configuration
+  compatibility, and live Educational Lab behavior unchanged.
+
 ## 0.5.0 - 2026-07-16
 
 - Replaced the over-prescriptive Educational Lab frame with one compact, state-first research

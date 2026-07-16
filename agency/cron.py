@@ -126,10 +126,6 @@ only when you independently decide that nothing should be delivered.
     )
 
 
-# Compatibility constant for integrations/tests that inspect the safe default prompt.
-CRON_PROMPT = cron_prompt()
-
-
 def gate_payload() -> dict[str, Any]:
     config = load_config()
     engine = AgencyEngine(AgencyStore(config), config)

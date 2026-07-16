@@ -29,9 +29,10 @@ def test_gate_main_fails_closed(tmp_path, monkeypatch, capsys):
 
 
 def test_cron_prompt_requires_tool_only_cycle():
-    assert "Never call any other tool" in cron.CRON_PROMPT
-    assert "speak_eligible" in cron.CRON_PROMPT
-    assert "Return exactly delivery_text" in cron.CRON_PROMPT
+    prompt = cron.cron_prompt()
+    assert "Never call any other tool" in prompt
+    assert "speak_eligible" in prompt
+    assert "Return exactly delivery_text" in prompt
 
 
 def test_educational_cron_prompt_removes_every_plugin_guardrail(config_factory):

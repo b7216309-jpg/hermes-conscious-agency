@@ -4,12 +4,13 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "hermes-conscious-agency"
-version = "0.5.0"
+version = "0.5.1"
 description = "Persistent agency and an opt-in longitudinal subjectivity experiment for Hermes Agent"
 readme = "README.md"
 requires-python = ">=3.11"
 license = "MIT"
 authors = [{name = "b7216309-jpg"}]
+dependencies = ["PyYAML>=6.0"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Programming Language :: Python :: 3",
@@ -20,7 +21,7 @@ classifiers = [
 
 [project.optional-dependencies]
 encryption = ["sqlcipher3>=0.5.4"]
-dev = ["pytest>=8.0", "pytest-cov>=5.0", "ruff>=0.9", "PyYAML>=6.0"]
+dev = ["pytest>=8.0", "ruff>=0.9"]
 
 [tool.setuptools]
 packages = ["agency"]
