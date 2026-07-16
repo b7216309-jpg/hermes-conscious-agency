@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from copy import deepcopy
+
 if __package__:  # Hermes loads this as a package.
     from .agency.cli import cli_command, register_cli, slash_command
     from .agency.runtime import AgencyRuntime
@@ -14,10 +16,16 @@ else:  # Direct test/dev import of a plugin-root __init__.py.
 
 def register(ctx) -> None:
     runtime = AgencyRuntime()
+    schema = deepcopy(CONSCIOUS_AGENCY_SCHEMA)
+    if runtime._expressive_subjective_cron():
+        actions = schema["parameters"]["properties"]["action"]["enum"]
+        schema["parameters"]["properties"]["action"]["enum"] = [
+            action for action in actions if action not in {"tick", "record_decision"}
+        ]
     ctx.register_tool(
         name="conscious_agency",
         toolset="conscious_agency",
-        schema=CONSCIOUS_AGENCY_SCHEMA,
+        schema=schema,
         handler=runtime.tool_handler,
         emoji="🧭",
     )

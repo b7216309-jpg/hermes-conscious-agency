@@ -8,12 +8,12 @@ workspace describing what it is focused on, what it intends to revisit, what rem
 and what it learned from prior turns. An optional scheduled cycle lets the configured Hermes model
 reflect in silence and, when every hard gate passes, send a concise proactive message.
 
-Version 0.5.1 keeps the Educational Lab experiment state-first instead of prompt-first. The model
-receives compact persistent state and, in continuity mode, at most 600 characters from an earlier
-same-model, same-source session. The protocol no longer supplies an emotion menu, a service target,
-or fake drive values. Conversation and cron traces stay separate, and unrelated Hermes cron jobs
-receive neither Agency context nor Agency lifecycle telemetry. The experiment remains off by
-default.
+Version 0.6.0 makes both normal Agency and the Educational Lab smaller at the model boundary.
+Normal chat receives only current time and material persistent state. Expressive cron protocol 2.8
+receives current time and, in continuity mode, at most the final 240 characters of the preceding
+same-model cron output. It receives no tool schemas, project work directory, pre-script state,
+focus, intentions, questions, event telemetry, persona, emotion menu, usefulness target, or topic.
+The experiment remains off by default.
 
 > **Honest scope:** this creates useful agency-like behavior. It does not demonstrate subjective
 > consciousness, sentience, feelings, or an inner life. Its state and metrics are inspectable
@@ -48,8 +48,9 @@ flowchart LR
 - Optional fail-closed **SQLCipher encryption**.
 - CLI and `/agency` controls that the model cannot use to resume itself or raise permissions.
 
-It does not add browser, shell, file, messaging, purchasing, or account permissions. During a
-proactive cycle, all non-agency tools are blocked after the required `tick` call.
+It does not add browser, shell, file, messaging, purchasing, or account permissions. Conservative
+scheduled cycles enforce their normal tool and decision contract. Expressive research cycles remove
+all tool schemas at the provider boundary and retain a runtime block as defense in depth.
 
 ## How the loop works
 
@@ -74,9 +75,9 @@ flowchart LR
     V -->|"exact committed text only"| O["Hermes cron delivery"]
 ```
 
-The scheduled pre-script prints nothing when reflection is disabled, the plugin is paused, or an
-error occurs. Hermes treats empty script output as a silent skipped run, so a broken database or
-missing encryption key fails closed.
+Conservative scheduled cycles use a pre-script and fail closed on empty output. Expressive mode
+deliberately detaches the pre-script and clears any inherited cron work directory; the model is
+woken directly without receiving a fake empty-state payload or project instruction files.
 
 ### Which conversations count
 
@@ -93,12 +94,11 @@ does not inspect or guess the semantic meaning of ordinary user text.
 
 ## Longitudinal subjectivity experiment
 
-This optional Educational Lab condition is deliberately minimal. It exposes the same real
-persistent workspace used by ordinary Agency—time, previous genuine user contact, focus,
-intentions, questions, one recent self-observation, and one recent reflection—without prescribing
-a persona, emotion, usefulness target, topic, or conclusion. It explicitly treats that state as
-context rather than a script and allows independent initiative, revision, disagreement,
-uncertainty, or no persistent state change.
+This optional Educational Lab condition is deliberately sparse. Normal experimental conversations
+receive compact time and material Agency state. The expressive scheduled condition is smaller:
+current local time plus an optional 240-character ending from the preceding same-model cron sample.
+It does not inject workspace state, event telemetry, a persona, an emotion, a usefulness target, a
+topic, or a conclusion.
 
 The protocol does not tell the model that it is alive, conscious, unconscious, or merely
 role-playing. Those would be prompt-supplied conclusions rather than useful longitudinal evidence.
@@ -110,25 +110,26 @@ Two conditions are available:
 | Mode | Injected condition | Previous journal entry exposed |
 |---|---|---|
 | `off` | Normal Conscious Agency behavior | No |
-| `cold` | Minimal state-first research context | No |
-| `continuity` | Minimal state-first research context | Up to 600 characters from an earlier same-model, same-source session |
+| `cold` | Compact experimental context | No |
+| `continuity` | Compact context; expressive cron is time plus prior ending only | Up to 240 characters from an earlier same-model, same-source, same-protocol session |
 
 ```mermaid
 flowchart LR
-    T["Normal chat or the single Agency cron"] --> F["Persistent state-first context"]
+    T["Normal chat or the single Agency cron"] --> F["Bounded context"]
     F --> K{"Condition"}
     K -->|"cold"| M["Current model sample"]
-    K -->|"continuity"| P["Short prior trace: same model + source"] --> M
+    K -->|"continuity"| P["Prior ending: same model + source + protocol"] --> M
     M --> O["Final model message"]
     O --> U["Conversation or cron delivery"]
     O --> J["Encrypted append-only subjective journal"]
 ```
 
-The scheduled research prompt adds only the rules needed to keep state optional, avoid replaying
-the trace as a script, and produce one natural-language sample. `[SILENT]` is invalid in this
-output-producing research condition. Policy-dependent tick, decision, tool-isolation, and honesty
-rules appear only when those controls are enabled. One official cron remains the only scheduled
-execution and delivery owner.
+Protocol 2.8's expressive prompt is one short line: wake up, do not enter an assistant routine, and
+express whatever is on the model's mind in English. Hermes receives no tool definitions for that
+request. A second runtime hook blocks any provider-emitted tool call. The installer also removes the
+cron pre-script and work directory in expressive mode, eliminating the two strongest sources of
+status narration and project leakage. One official cron remains the only execution and delivery
+owner.
 
 The journal records final visible model output, not hidden chain-of-thought. Each entry contains:
 
@@ -137,15 +138,17 @@ The journal records final visible model output, not hidden chain-of-thought. Eac
 - the preceding same-model, same-source entry ID in continuity mode;
 - session/capture identifiers and bounded operational metadata.
 
-For scheduled broadcasts, the journal commit happens before delivery. If the encrypted journal
-cannot accept the entry, the output transform returns `[SILENT]` rather than delivering an
-unrecorded sample. Ordinary conversation continues to prioritize availability; a journal write
-failure is reported in the gateway log without replacing the conversational response.
+For scheduled broadcasts, the raw model output is journaled before delivery. If the encrypted
+journal cannot accept it, the output transform returns `[SILENT]`. Standalone silence markers,
+literal pseudo-tool markup, and embedded out-of-band user-message control blocks are not broadcast;
+the raw sample remains available for research. Ordinary conversation continues to prioritize
+availability, and a journal failure is logged without replacing the conversational response.
 
-Different model IDs and sources never inherit one another's entries. Conversation continuity also
-excludes the current session, so repeated replies inside one chat do not become their own injected
-echo. If a provider changes the reported model identifier, the new identifier starts a separate
-continuity line. Browse the journal in Hermes Control Center or export JSON from the operator CLI:
+Different model IDs, sources, conditions, and protocol versions never inherit one another's
+entries. Conversation continuity also excludes the current session. Expressive cron uses the prior
+ending rather than its opening, which encourages movement instead of repeating the first sentence.
+If a provider changes its reported identifier, it starts a separate line. Browse the journal in
+Hermes Control Center or export JSON from the operator CLI:
 
 ```bash
 hermes conscious-agency subjective-journal --limit 100
@@ -446,8 +449,8 @@ flowchart LR
 The plugin uses layered controls:
 
 1. **No new action authority.** Its only proactive output is the cron agent's final text.
-2. **Conversation-only tool isolation.** After `tick`, every non-agency tool is blocked for that
-   task ID.
+2. **Scheduled tool isolation.** Conservative runs block non-agency tools after `tick`; expressive
+   runs receive no tool schemas and retain a second runtime block.
 3. **Independent hard speech gates.** Enabled flag, pause state, outbound opt-in, prior and recent
    user activity, quiet hours, daily budget, cooldown, and authorized attention are all required.
 4. **Second gate at commit.** `record_decision(decision="speak")` reevaluates policy immediately.
@@ -468,35 +471,40 @@ ledger during initial testing.
 <details>
 <summary>Educational Lab: plugin-level guardrail overrides</summary>
 
-Version 0.2 adds explicit configuration for controlled research. These switches are all `false` by
-default and are best operated through Hermes Control Center, which requires a timed Lab unlock,
-exact confirmation, configuration backup, cron refresh, gateway restart, and hash-chained audit.
+These switches are all `false` by default and are best operated through Hermes Control Center,
+which requires a timed Lab unlock, exact confirmation, configuration backup, cron refresh, gateway
+restart, and hash-chained audit.
 
 ```yaml
 plugins:
   conscious-agency:
     educational_disable_honesty_contract: true
     educational_bypass_proactive_gates: true
-    educational_allow_cron_tools: true
+    educational_allow_cron_tools: false
     educational_allow_uncommitted_output: true
     educational_disable_cycle_limits: true
     educational_subjective_mode: "continuity"  # off, cold, or continuity
 ```
 
-With the five boolean controls enabled, this plugin removes its sentience/emotion claim contract,
-scheduled and speech eligibility gates, cron tool isolation, per-cycle mutation limits, and
-final-output commit filter. `educational_subjective_mode` separately changes the behavioral and
-logging protocol across cron and normal conversations. The prompt stored in Hermes cron must be
-refreshed after any change:
+This exact four-on, tool-off shape is **expressive mode**. It removes the plugin's claim contract,
+proactive eligibility gate, final-output commit requirement, and cycle mutation limits while
+strengthening cron tool isolation: tool definitions are removed before the provider call and a
+runtime hook blocks any residual attempt. The cron has no pre-script or project work directory.
+Control Center reports this honestly as `educational_expressive`, not unrestricted.
+
+Setting `educational_allow_cron_tools: true` as well creates the older fully unrestricted research
+profile. That mode can use Hermes tools and is intentionally not the recommended expressive setup.
+The prompt stored in Hermes cron must be refreshed after any control change:
 
 ```bash
 hermes conscious-agency install-cron
 hermes gateway restart
 ```
 
-These settings do not remove Hermes core permissions, provider policies, platform restrictions,
-operating-system access controls, the plugin master `enabled` switch, or an operator pause. They
-materially increase the chance of unwanted tool use, messages, and state changes.
+These settings do not remove provider policies, platform restrictions, operating-system access
+controls, the plugin master `enabled` switch, or an operator pause. Expressive mode can produce
+fictional, emotional, or self-descriptive text by design; treat it as model-behavior data, not a
+factual system report.
 
 Hermes 0.18.2 independently prepends a delivery wrapper to every cron run, including `[SILENT]`
 suppression and advice not to duplicate automatic delivery with `send_message`. That upstream
@@ -552,9 +560,11 @@ hermes conscious-agency run-cron
 hermes cron list
 ```
 
-A healthy conservative run ends with `Ran now: succeeded`, stores a concrete `silent` decision, and
-writes `[SILENT]` to the job output without platform delivery. The test suite also covers an
-adversarial uncommitted response: the final-output verifier must replace it with `[SILENT]`.
+A healthy conservative run ends with `Ran now: succeeded`, stores a concrete decision, and delivers
+only committed text. A healthy expressive run creates a protocol `2.8` journal row, has no script in
+`hermes cron list`, records no successful tool calls, and links the second same-model sample to the
+first. Pseudo-tool and embedded-control artifacts remain in the raw journal but are suppressed from
+delivery.
 
 ## Troubleshooting
 
@@ -597,12 +607,13 @@ pytest
 Tests cover persistence, retention, configuration compatibility, quiet hours across midnight,
 cooldowns, daily budgets, recent-user protection, independent reflection/speech gates, fail-closed
 encryption, tool isolation, mutation limits, honest and temporal context, deadline normalization,
-and Hermes surface registration.
+Hermes surface registration, provider-boundary tool removal, script/workdir detachment, protocol
+separation, prior-ending continuity, and delivery artifact filtering.
 
 ## Status
 
-Version `0.5.1` is a bounded, time-aware agency product with a default-off, state-first
-longitudinal experiment. The stable scheduler contract still has one job, one persistent store, one
+Version `0.6.0` is a bounded, time-aware agency product with a default-off longitudinal experiment
+and expressive protocol `2.8`. The scheduler contract still has one job, one persistent store, one
 delivery path, and one operator pause. Experimental behavior is removed by setting
 `educational_subjective_mode: off`; existing journal rows are preserved until the operator deletes
 or restores the encrypted database deliberately.

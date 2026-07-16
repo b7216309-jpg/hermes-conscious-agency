@@ -2,6 +2,25 @@
 
 All notable changes are documented here.
 
+## 0.6.0 - 2026-07-16
+
+- Reduced normal Agency context to current time and material persistent state; removed repeated
+  identity, principle, behavior, and operational coaching from the model boundary.
+- Added expressive protocol 2.8: current time plus an optional 240-character prior ending, separated
+  by model, source, condition, and protocol version.
+- Removed tool schemas at the provider boundary for expressive cron and retained a runtime block as
+  defense in depth; normal conversations keep their configured Hermes tools.
+- Detached the cron pre-script and cleared inherited project work directories in expressive mode,
+  eliminating empty-state narration and project prompt leakage.
+- Kept exact raw journal output while suppressing standalone silence markers, literal pseudo-tool
+  markup, and embedded out-of-band user-message blocks from delivery and future continuity.
+- Reduced model-facing tool actions and results while preserving operator snapshot, event, and CLI
+  surfaces.
+- Added protocol-separated longitudinal linking, prior-ending continuity, compact gate/decision
+  payloads, case-insensitive silence accounting, and focused regression coverage.
+- Qualified the release against Hermes Agent 0.18.2 with live normal-chat and repeated local-model
+  cron cycles.
+
 ## 0.5.1 - 2026-07-16
 
 - Removed the import-time default cron prompt constant; callers and tests now build the prompt from

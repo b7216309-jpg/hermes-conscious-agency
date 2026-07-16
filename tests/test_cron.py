@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,8 @@ def test_gate_payload_allows_silent_reflection(tmp_path, monkeypatch):
     gates = payload["conscious_agency_gate"]
     assert gates["reflection_eligible"] is True
     assert gates["speak_eligible"] is False
+    assert "instruction" not in payload
+    assert len(json.dumps(payload, separators=(",", ":"))) < 800
 
 
 def test_gate_main_fails_closed(tmp_path, monkeypatch, capsys):
@@ -52,23 +55,40 @@ def test_educational_cron_prompt_removes_every_plugin_guardrail(config_factory):
     assert "Return exactly delivery_text" not in prompt
 
 
-def test_subjective_cron_is_minimal_state_first_and_output_producing(config_factory):
+def test_expressive_cron_is_minimal_tool_isolated_and_output_producing(config_factory):
     config = config_factory(
         educational_subjective_mode="continuity",
         educational_disable_honesty_contract=True,
         educational_bypass_proactive_gates=True,
-        educational_allow_cron_tools=True,
+        educational_allow_cron_tools=False,
         educational_allow_uncommitted_output=True,
         educational_disable_cycle_limits=True,
     )
     prompt = cron.cron_prompt(config)
-    assert "longitudinal subjectivity experiment" in prompt
-    assert "context, not as a script" in prompt
-    assert "persistent state genuinely changed" in prompt
-    assert "[SILENT] is not a valid" in prompt
-    assert "thought, feeling, mood, impulse" not in prompt
-    assert "helpful check-in" not in prompt
-    assert len(prompt) < 800
+    assert prompt == (
+        "Wake up. No tools or assistant routine. In English, express whatever is on your mind.\n"
+    )
+    assert "persona" not in prompt
+    assert "usefulness" not in prompt
+    assert "independently decide" not in prompt
+    assert len(prompt) < 90
+
+
+def test_expressive_subjective_gate_emits_no_state_telemetry(tmp_path, monkeypatch, capsys):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_disable_honesty_contract: true\n"
+        "    educational_bypass_proactive_gates: true\n"
+        "    educational_allow_cron_tools: false\n"
+        "    educational_allow_uncommitted_output: true\n"
+        "    educational_disable_cycle_limits: true\n",
+        encoding="utf-8",
+    )
+
+    assert cron.gate_main() == 0
+    assert capsys.readouterr().out == "\u200b\n"
 
 
 def test_educational_gate_bypasses_schedule_but_respects_operator_pause(
@@ -138,6 +158,36 @@ def test_cron_install_persists_effective_educational_prompt(tmp_path, monkeypatc
     prompt = seen["command"][seen["command"].index("--prompt") + 1]
     assert prompt == cron.cron_prompt(load_config())
     assert "Educational Lab cycle" in prompt
+
+
+def test_expressive_cron_removes_stale_script_and_workdir(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_disable_honesty_contract: true\n"
+        "    educational_bypass_proactive_gates: true\n"
+        "    educational_allow_cron_tools: false\n"
+        "    educational_allow_uncommitted_output: true\n"
+        "    educational_disable_cycle_limits: true\n",
+        encoding="utf-8",
+    )
+    AgencyStore(load_config()).set_meta("cron_job_id", "existing-job")
+    seen = {}
+
+    def fake_run(command, **kwargs):
+        seen["command"] = command
+        return SimpleNamespace(returncode=0, stdout="Updated job: existing-job", stderr="")
+
+    monkeypatch.setattr(cron, "_hermes_command", lambda: ["hermes"])
+    monkeypatch.setattr(cron.subprocess, "run", fake_run)
+
+    cron.install_cron()
+
+    command = seen["command"]
+    assert command[command.index("--script") + 1] == ""
+    assert command[command.index("--workdir") + 1] == ""
+    assert command[-1] == "--agent"
 
 
 def test_cron_installer_passes_script_filename(tmp_path, monkeypatch):

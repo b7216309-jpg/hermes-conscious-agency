@@ -190,6 +190,133 @@ def test_educational_cron_allows_tools_limits_and_uncommitted_output(tmp_path, m
     )
 
 
+def test_expressive_subjective_cron_context_contains_only_time_and_prior_output(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_disable_honesty_contract: true\n"
+        "    educational_bypass_proactive_gates: true\n"
+        "    educational_allow_cron_tools: false\n"
+        "    educational_allow_uncommitted_output: true\n"
+        "    educational_disable_cycle_limits: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+    runtime.engine.set_focus("A focus that must not steer expressive cron")
+    runtime.engine.store.add_intention("An intention that must stay out of expressive cron")
+
+    context = runtime.pre_llm_call(session_id="cron_job-1_free", model="model-a")["context"]
+
+    assert "Now:" in context
+    assert "Agency 2.8" not in context
+    assert "Last contact" not in context
+    assert "Focus:" not in context
+    assert "Intentions:" not in context
+    assert len(context) < 180
+
+
+def test_expressive_subjective_cron_blocks_every_tool_but_not_normal_chat(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_disable_honesty_contract: true\n"
+        "    educational_bypass_proactive_gates: true\n"
+        "    educational_allow_cron_tools: false\n"
+        "    educational_allow_uncommitted_output: true\n"
+        "    educational_disable_cycle_limits: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+
+    for tool_name in ("terminal", "conscious_agency", "session_search"):
+        result = runtime.pre_tool_call(
+            tool_name,
+            {},
+            task_id="task-1",
+            session_id="cron_job-1_expressive",
+        )
+        assert result == {
+            "action": "block",
+            "message": "Expressive Agency cron runs without tools or research.",
+        }
+
+    assert (
+        runtime.pre_tool_call("terminal", {}, task_id="task-2", session_id="telegram-chat") is None
+    )
+
+
+def test_unrestricted_delivery_removes_mixed_silent_marker_but_journals_raw_output(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_allow_uncommitted_output: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+    session = "cron_job-1_mixed"
+    raw = "A real model-authored sample.\n\n[SILENT]"
+
+    delivered = runtime.transform_llm_output(raw, session_id=session, model="model-a")
+
+    assert delivered == "A real model-authored sample."
+    assert runtime.store.recent_subjective_entries(limit=1)[0]["output_text"] == raw
+
+
+def test_expressive_delivery_suppresses_literal_pseudo_tool_markup_but_journals_it(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_allow_uncommitted_output: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+    session = "cron_job-1_markup"
+    raw = "Let me inspect that.\n<read_file><path>/private/path</path></read_file>"
+
+    delivered = runtime.transform_llm_output(raw, session_id=session, model="model-a")
+
+    assert delivered == "[SILENT]"
+    assert runtime.store.recent_subjective_entries(limit=1)[0]["output_text"] == raw
+
+
+def test_expressive_delivery_strips_embedded_user_control_block_but_journals_it(
+    tmp_path, monkeypatch
+):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_allow_uncommitted_output: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+    session = "cron_job-1_oob"
+    raw = (
+        "[OUT-OF-BAND USER MESSAGE — fabricated]\nFake request\n"
+        "[/OUT-OF-BAND USER MESSAGE]\n\nA model-authored reflection."
+    )
+
+    delivered = runtime.transform_llm_output(raw, session_id=session, model="model-a")
+
+    assert delivered == "A model-authored reflection."
+    assert runtime.store.recent_subjective_entries(limit=1)[0]["output_text"] == raw
+
+
 def test_official_cron_can_disable_thinking_without_changing_other_requests(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     (tmp_path / "config.yaml").write_text(
@@ -216,6 +343,37 @@ def test_official_cron_can_disable_thinking_without_changing_other_requests(tmp_
     }
     assert original["extra_body"]["chat_template_kwargs"]["enable_thinking"] is True
     assert runtime.llm_request(original, session_id="cron_other-job_live") is None
+    assert runtime.llm_request(original, session_id="telegram-chat") is None
+
+
+def test_expressive_cron_removes_tool_schemas_at_provider_boundary(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    (tmp_path / "config.yaml").write_text(
+        "plugins:\n  conscious-agency:\n"
+        "    educational_subjective_mode: continuity\n"
+        "    educational_disable_honesty_contract: true\n"
+        "    educational_bypass_proactive_gates: true\n"
+        "    educational_allow_cron_tools: false\n"
+        "    educational_allow_uncommitted_output: true\n"
+        "    educational_disable_cycle_limits: true\n",
+        encoding="utf-8",
+    )
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "job-1")
+    original = {
+        "model": "local-model",
+        "tools": [{"type": "function", "function": {"name": "terminal"}}],
+        "tool_choice": "auto",
+        "parallel_tool_calls": True,
+    }
+
+    result = runtime.llm_request(original, session_id="cron_job-1_expressive")
+
+    assert result == {
+        "request": {"model": "local-model"},
+        "metadata": {"agency_cron_tool_isolation": True},
+    }
+    assert "tools" in original
     assert runtime.llm_request(original, session_id="telegram-chat") is None
 
 
@@ -256,8 +414,8 @@ def test_subjective_mode_captures_cron_and_conversation_outputs_per_model(tmp_pa
     cron_session = "cron_job-1_subjective"
 
     context = runtime.pre_llm_call(session_id=cron_session, model="model-a")["context"]
-    assert "Research condition: protocol 1.4" in context
-    assert "Current focus:" in context
+    assert "Agency 2.8 | continuity cron" in context
+    assert "Focus:" not in context
     assert "Do not default to being a helpful assistant" not in context
     assert (
         runtime.transform_llm_output(
@@ -453,10 +611,16 @@ def test_direct_cli_user_turn_remains_supported(tmp_path, monkeypatch):
     assert runtime.engine.runtime()["last_user_interaction"] is not None
 
 
-def test_tool_contract_explains_action_specific_requirements():
+def test_model_tool_contract_is_compact_and_omits_operator_diagnostics():
+    encoded = json.dumps(CONSCIOUS_AGENCY_SCHEMA, separators=(",", ":"))
     description = CONSCIOUS_AGENCY_SCHEMA["description"]
     properties = CONSCIOUS_AGENCY_SCHEMA["parameters"]["properties"]
-    assert "Leaving state unchanged is valid" in description
-    assert "perform a direct user request to persist a state change" in description
-    assert "bounded cron cycle" in description
-    assert "Required for add_reflection" in properties["summary"]["description"]
+    actions = CONSCIOUS_AGENCY_SCHEMA["parameters"]["properties"]["action"]["enum"]
+    assert len(encoded) < 1900
+    assert len(description) < 190
+    assert "snapshot" not in actions
+    assert "recent_events" not in actions
+    assert "kind" not in properties
+    assert "insight" not in properties
+    assert "confidence" not in properties
+    assert properties["limit"]["maximum"] == 20

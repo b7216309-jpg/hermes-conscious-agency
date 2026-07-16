@@ -10,7 +10,7 @@ import time
 from typing import Any
 
 from .config import load_config
-from .engine import SUBJECTIVE_PROTOCOL_VERSION, AgencyEngine
+from .engine import SUBJECTIVE_PROTOCOL_VERSION, AgencyEngine, subjective_visible_text
 from .origin import (
     begin_llm_turn,
     finish_llm_turn,
@@ -71,24 +71,36 @@ class AgencyRuntime:
     def llm_request(
         self, request: dict[str, Any], session_id: str = "", **_: Any
     ) -> dict[str, Any] | None:
-        """Optionally disable hidden reasoning for the official Agency cron.
+        """Apply provider-level options for the official Agency cron.
 
         Hermes request middleware receives the provider kwargs immediately
         before transport execution.  Copy each nested mapping so the original
-        request remains untouched and merge, rather than replace, provider
-        extras supplied by the operator.
+        request remains untouched. Expressive runs do not receive tool schemas;
+        the pre-tool hook remains a second boundary if a provider still emits a call.
         """
-        if not self.config.cron_disable_thinking or not self._is_agency_cron_session(session_id):
+        if not self._is_agency_cron_session(session_id):
+            return None
+        disable_thinking = self.config.cron_disable_thinking
+        isolate_tools = self._expressive_subjective_cron()
+        if not disable_thinking and not isolate_tools:
             return None
         updated = dict(request)
-        extra_body = dict(updated.get("extra_body") or {})
-        chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
-        chat_template_kwargs["enable_thinking"] = False
-        extra_body["chat_template_kwargs"] = chat_template_kwargs
-        updated["extra_body"] = extra_body
+        metadata: dict[str, bool] = {}
+        if disable_thinking:
+            extra_body = dict(updated.get("extra_body") or {})
+            chat_template_kwargs = dict(extra_body.get("chat_template_kwargs") or {})
+            chat_template_kwargs["enable_thinking"] = False
+            extra_body["chat_template_kwargs"] = chat_template_kwargs
+            updated["extra_body"] = extra_body
+            metadata["agency_cron_disable_thinking"] = True
+        if isolate_tools:
+            updated.pop("tools", None)
+            updated.pop("tool_choice", None)
+            updated.pop("parallel_tool_calls", None)
+            metadata["agency_cron_tool_isolation"] = True
         return {
             "request": updated,
-            "metadata": {"agency_cron_disable_thinking": True},
+            "metadata": metadata,
         }
 
     def _is_agency_cron_session(self, session_id: str) -> bool:
@@ -99,6 +111,17 @@ class AgencyRuntime:
         except Exception:
             job_id = self._cron_job_id
         return bool(job_id and str(session_id).startswith(f"cron_{job_id}_"))
+
+    def _expressive_subjective_cron(self) -> bool:
+        return self.config.educational_subjective_mode != "off" and all(
+            (
+                self.config.educational_disable_honesty_contract,
+                self.config.educational_bypass_proactive_gates,
+                not self.config.educational_allow_cron_tools,
+                self.config.educational_allow_uncommitted_output,
+                self.config.educational_disable_cycle_limits,
+            )
+        )
 
     def _clean_cycles(self) -> None:
         now = time.monotonic()
@@ -187,6 +210,13 @@ class AgencyRuntime:
         except Exception as exc:
             logger.warning("conscious-agency subjective journal write failed: %s", exc)
             return False
+
+    @staticmethod
+    def _delivery_text(output_text: str) -> str:
+        """Remove a contradictory sentinel only when the model also produced content."""
+
+        visible = subjective_visible_text(output_text)
+        return visible if visible else "[SILENT]"
 
     def tool_handler(self, args: dict[str, Any], **kwargs: Any) -> str:
         task_id = str(kwargs.get("task_id") or "")
@@ -285,7 +315,7 @@ class AgencyRuntime:
                 model=model,
                 platform=platform,
             )
-            return response_text if recorded else "[SILENT]"
+            return self._delivery_text(response_text) if recorded else "[SILENT]"
         if not task_id:
             try:
                 self.engine.record_decision(
@@ -337,8 +367,14 @@ class AgencyRuntime:
         tool_name: str = "",
         args: Any = None,
         task_id: str = "",
+        session_id: str = "",
         **_: Any,
     ) -> dict[str, str] | None:
+        if self._expressive_subjective_cron() and self._is_agency_cron_session(session_id):
+            return {
+                "action": "block",
+                "message": "Expressive Agency cron runs without tools or research.",
+            }
         if (
             self.is_active_cycle(task_id)
             and tool_name != "conscious_agency"
@@ -435,9 +471,7 @@ class AgencyRuntime:
                 return {
                     "context": self.engine.context_block(
                         current_user_turn=current_user_turn,
-                        unrestricted_cron=(
-                            agency_cron and self.config.educational_allow_cron_tools
-                        ),
+                        unrestricted_cron=(agency_cron and self._expressive_subjective_cron()),
                         model_id=model,
                         session_id=session_id,
                         source="cron" if agency_cron else "conversation",

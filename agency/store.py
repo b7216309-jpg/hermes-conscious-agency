@@ -612,6 +612,8 @@ class AgencyStore:
         model_id: str,
         *,
         source: str = "",
+        condition: str = "",
+        prompt_version: str = "",
         exclude_session_id: str = "",
     ) -> dict[str, Any] | None:
         clean_model = model_id.strip()[:500] or "unknown"
@@ -623,6 +625,15 @@ class AgencyStore:
                 raise ValueError("subjective source must be cron or conversation")
             clauses.append("source = ?")
             params.append(clean_source)
+        if condition.strip():
+            clean_condition = condition.strip().lower()
+            if clean_condition not in {"cold", "continuity"}:
+                raise ValueError("subjective condition must be cold or continuity")
+            clauses.append("condition = ?")
+            params.append(clean_condition)
+        if prompt_version.strip():
+            clauses.append("prompt_version = ?")
+            params.append(prompt_version.strip()[:80])
         if exclude_session_id.strip():
             clauses.append("session_id != ?")
             params.append(exclude_session_id.strip()[:500])
@@ -676,9 +687,10 @@ class AgencyStore:
             if clean_condition == "continuity":
                 prior_row = conn.execute(
                     """SELECT id FROM subjective_entries
-                       WHERE model_id = ? AND source = ?
+                       WHERE model_id = ? AND source = ? AND condition = ?
+                             AND prompt_version = ?
                        ORDER BY created_at DESC, rowid DESC LIMIT 1""",
-                    (clean_model, clean_source),
+                    (clean_model, clean_source, clean_condition, clean_version),
                 ).fetchone()
                 prior_id = prior_row[0] if prior_row else None
             conn.execute(
@@ -751,7 +763,7 @@ class AgencyStore:
             aggregate = conn.execute(
                 """SELECT COUNT(*), MIN(created_at), MAX(created_at),
                           COALESCE(AVG(LENGTH(output_text)), 0),
-                          SUM(CASE WHEN output_text = '[SILENT]' THEN 1 ELSE 0 END),
+                          SUM(CASE WHEN LOWER(TRIM(output_text)) = '[silent]' THEN 1 ELSE 0 END),
                           SUM(CASE WHEN prior_entry_id IS NOT NULL THEN 1 ELSE 0 END)
                    FROM subjective_entries"""
             ).fetchone()

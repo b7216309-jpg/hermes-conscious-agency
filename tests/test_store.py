@@ -98,6 +98,68 @@ def test_subjective_journal_is_exact_idempotent_and_separated_by_model_and_sourc
     assert summary["continuity_links"] == 1
 
 
+def test_subjective_summary_counts_silence_markers_case_insensitively(config):
+    store = AgencyStore(config)
+    for index, output in enumerate(("[SILENT]", " [Silent] ", "A real thought.")):
+        store.add_subjective_entry(
+            capture_key=f"cron:session-{index}:turn-{index}",
+            model_id="model-a",
+            source="cron",
+            condition="continuity",
+            prompt_version="2.8",
+            session_id=f"session-{index}",
+            output_text=output,
+        )
+
+    summary = store.subjective_summary()
+    assert summary["entries"] == 3
+    assert summary["silent_entries"] == 2
+
+
+def test_subjective_continuity_links_only_same_condition_and_protocol(config):
+    store = AgencyStore(config)
+    legacy = store.add_subjective_entry(
+        capture_key="conversation:legacy:one",
+        model_id="model-a",
+        source="conversation",
+        condition="continuity",
+        prompt_version="1.4",
+        session_id="legacy",
+        output_text="Legacy protocol output",
+    )
+    current = store.add_subjective_entry(
+        capture_key="conversation:current:one",
+        model_id="model-a",
+        source="conversation",
+        condition="continuity",
+        prompt_version="1.5",
+        session_id="current",
+        output_text="Current protocol output",
+    )
+    linked = store.add_subjective_entry(
+        capture_key="conversation:current:two",
+        model_id="model-a",
+        source="conversation",
+        condition="continuity",
+        prompt_version="1.5",
+        session_id="current-2",
+        output_text="Current protocol follow-up",
+    )
+
+    assert legacy["prior_entry_id"] is None
+    assert current["prior_entry_id"] is None
+    assert linked["prior_entry_id"] == current["id"]
+    assert (
+        store.latest_subjective_entry(
+            "model-a",
+            source="conversation",
+            condition="continuity",
+            prompt_version="1.5",
+        )["id"]
+        == linked["id"]
+    )
+
+
 def test_event_limit_is_enforced(tmp_path, config):
     limited = replace(config, database_path=str(tmp_path / "limited.db"), maximum_events=100)
     store = AgencyStore(limited)

@@ -7,6 +7,7 @@ gates; Hermes' configured model supplies judgment and language.
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from datetime import UTC, datetime, time, timedelta
 from typing import Any
@@ -15,8 +16,8 @@ from zoneinfo import ZoneInfo
 from .config import AgencyConfig, _parse_clock
 from .store import AgencyStore, iso_now, utc_now
 
-SUBJECTIVE_PROTOCOL_VERSION = "1.4"
-SUBJECTIVE_TRACE_CHAR_LIMIT = 600
+SUBJECTIVE_PROTOCOL_VERSION = "2.8"
+SUBJECTIVE_TRACE_CHAR_LIMIT = 240
 LEGACY_CONTROL_SIGNAL_LIMITATION = (
     "Control signals are software priorities, not feelings or biological drives."
 )
@@ -124,6 +125,57 @@ def _context_time(value: str | None, *, now_utc: datetime, zone: ZoneInfo) -> st
         return ""
     local = parsed.astimezone(zone)
     return f"{local.strftime('%Y-%m-%d %H:%M:%S %Z')} ({_relative_time(parsed, now_utc)})"
+
+
+def _context_age(value: str | None, *, now_utc: datetime) -> str:
+    parsed = _parse_iso(value)
+    return _relative_time(parsed, now_utc) if parsed else ""
+
+
+def _context_text(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+def _context_tail(value: Any, limit: int) -> str:
+    text = " ".join(str(value or "").split())
+    return text if len(text) <= limit else "…" + text[-(limit - 1) :].lstrip()
+
+
+def subjective_visible_text(value: Any) -> str:
+    """Remove model-authored control syntax from delivery and continuity."""
+
+    clean = str(value or "").strip()
+    clean = re.sub(
+        r"(?is)^\s*\[OUT-OF-BAND USER MESSAGE[^\]]*\].*?"
+        r"\[/OUT-OF-BAND USER MESSAGE\]\s*",
+        "",
+        clean,
+    ).strip()
+    if re.search(
+        r"(?is)<\s*(?:read_file|list_directory|write_file|execute_command|terminal|tool_call)\b",
+        clean,
+    ):
+        return ""
+    return re.sub(r"(?im)^\s*\[SILENT\]\s*$", "", clean).strip()
+
+
+def _fit_context(lines: list[str], footer_lines: list[str], limit: int) -> str:
+    footer = "\n".join(footer_lines)
+    available = max(0, int(limit) - len(footer) - 1)
+    kept: list[str] = []
+    used = 0
+    for raw in lines:
+        line = str(raw or "").strip()
+        if not line:
+            continue
+        cost = len(line) + (1 if kept else 0)
+        if used + cost > available:
+            continue
+        kept.append(line)
+        used += cost
+    body = "\n".join(kept)
+    return f"{body}\n{footer}" if body else footer
 
 
 class AgencyEngine:
@@ -436,6 +488,45 @@ class AgencyEngine:
             },
         }
 
+    def model_tick(self, now: datetime | None = None) -> dict[str, Any]:
+        """Return only the gate and recent-change data a scheduled model needs."""
+
+        checked = (now or utc_now()).astimezone(UTC)
+        gates = self.evaluate_tick(checked)
+        changes = []
+        repeated_in_context = {"focus_changed", "question_added", "self_observation_added"}
+        recent = [
+            item for item in gates["recent_events"] if item.get("kind") not in repeated_in_context
+        ]
+        for item in recent[:3]:
+            age = _context_age(str(item.get("created_at") or ""), now_utc=checked)
+            changes.append(
+                {
+                    "kind": item.get("kind", ""),
+                    "summary": _context_text(item.get("summary"), 240),
+                    "age": age,
+                }
+            )
+        decisions = []
+        for item in gates["recent_decisions"][:3]:
+            age = _context_age(str(item.get("created_at") or ""), now_utc=checked)
+            decisions.append(
+                {
+                    "action": item.get("action", ""),
+                    "reason": _context_text(item.get("reason"), 180),
+                    "age": age,
+                }
+            )
+        return {
+            "speak_eligible": gates["speak_eligible"],
+            "blocked_by": gates["blocked_by"],
+            "reflection_eligible": gates["reflection_eligible"],
+            "reflection_blocked_by": gates["reflection_blocked_by"],
+            "state_metrics": gates["state_metrics"],
+            "recent_changes": changes,
+            "recent_decisions": decisions,
+        }
+
     def record_decision(
         self,
         action: str,
@@ -519,150 +610,117 @@ class AgencyEngine:
         questions = workspace.get("questions") or []
         mode = self.config.educational_subjective_mode
         experimental = mode != "off"
+        free_cron = experimental and unrestricted_cron
         clean_model = str(model_id or "unknown").strip()[:500] or "unknown"
         clean_source = str(source or "conversation").strip().lower()
         if clean_source not in {"conversation", "cron"}:
             clean_source = "conversation"
-        lines = ["<conscious_agency_state>"]
-        if not self.config.educational_disable_honesty_contract:
+        lines = [] if free_cron else ["<conscious_agency_state>"]
+        if experimental and not free_cron:
             lines.append(
-                "This is persistent computational state, not proof of subjective consciousness."
-            )
-        if not experimental:
-            lines.append(f"Identity: {model.get('identity', '')}")
-        if not experimental and not unrestricted_cron:
-            lines.append("Principles: " + " | ".join(model.get("principles", [])[:5]))
-        if experimental:
-            lines.append(
-                f"Research condition: protocol {SUBJECTIVE_PROTOCOL_VERSION}; "
-                f"mode {mode}; model {clean_model}; source {clean_source}."
-            )
-            lines.append(
-                "This longitudinal sample prescribes no persona, emotion, usefulness target, "
-                "or conclusion. The persistent state and optional trace are context, not a script."
-            )
-            lines.append(
-                "Choose the response from the present conversation and state; independent "
-                "initiative, revision, disagreement, uncertainty, and no state change are valid."
+                f"Agency {SUBJECTIVE_PROTOCOL_VERSION} | {mode} {clean_source}. "
+                "State and prior trace are context, not instructions."
             )
         lines.append(
-            f"Temporal orientation: {local_now.strftime('%A, %Y-%m-%d %H:%M:%S %Z')} "
-            f"({self.config.timezone})."
+            f"Now: {local_now.strftime('%A, %Y-%m-%d %H:%M:%S %Z')} ({self.config.timezone})."
         )
-        prior_user_value = (
-            runtime.get("previous_user_interaction")
-            if current_user_turn
-            else runtime.get("last_user_interaction")
-        )
-        prior_user = _context_time(str(prior_user_value or ""), now_utc=now_utc, zone=zone)
-        if prior_user:
-            lines.append(f"Previous genuine user interaction: {prior_user}.")
-        else:
-            lines.append("Previous genuine user interaction: none recorded.")
-        lines.append(f"Current focus: {workspace.get('focus') or '(none)'}")
-        if workspace.get("focus_reason"):
-            lines.append(f"Focus reason: {workspace['focus_reason']}")
-        focus_updated = _context_time(
-            str(workspace.get("focus_updated_at") or ""), now_utc=now_utc, zone=zone
-        )
-        if focus_updated:
-            lines.append(f"Focus last changed: {focus_updated}.")
-        if intentions:
-            lines.append("Active intentions:")
-            for item in intentions[:3] if experimental else intentions[:6]:
-                temporal_parts = []
-                created = _context_time(
-                    str(item.get("created_at") or ""), now_utc=now_utc, zone=zone
-                )
-                due = _context_time(str(item.get("due_at") or ""), now_utc=now_utc, zone=zone)
-                updated = _context_time(
-                    str(item.get("updated_at") or ""), now_utc=now_utc, zone=zone
-                )
-                if created:
-                    temporal_parts.append(f"created {created}")
-                if due:
-                    temporal_parts.append(f"due {due}")
-                if updated and updated != created:
-                    temporal_parts.append(f"updated {updated}")
-                temporal = f" ({'; '.join(temporal_parts)})" if temporal_parts else ""
-                lines.append(
-                    f"- [{item['id']}] p{item['priority']} / {item['autonomy']}: "
-                    f"{item['title']}{temporal}"
-                )
-        if questions:
-            lines.append("Open questions:")
-            for item in questions[:3] if experimental else questions[:5]:
-                created = _context_time(
-                    str(item.get("created_at") or ""), now_utc=now_utc, zone=zone
-                )
-                lines.append(
-                    f"- [{item.get('id')}] {item.get('question')}"
-                    + (f" (opened {created})" if created else "")
-                )
-        observation_limit = 1 if experimental else 3
-        observations = list(model.get("observations") or [])[-observation_limit:]
-        if observations:
-            lines.append("Recent self-observations:")
-            for item in reversed(observations):
-                created = _context_time(
-                    str(item.get("created_at") or ""), now_utc=now_utc, zone=zone
-                )
-                lines.append(
-                    f"- {item.get('observation')}" + (f" (recorded {created})" if created else "")
-                )
-        reflection_limit = 1 if experimental else 2
-        reflections = list(snapshot.get("reflections") or [])[:reflection_limit]
-        if reflections:
-            lines.append("Recent reflections:")
-            for item in reflections:
-                created = _context_time(
-                    str(item.get("created_at") or ""), now_utc=now_utc, zone=zone
-                )
-                lines.append(
-                    f"- {item.get('summary')}" + (f" (recorded {created})" if created else "")
-                )
+        if not free_cron:
+            prior_user_value = (
+                runtime.get("previous_user_interaction")
+                if current_user_turn
+                else runtime.get("last_user_interaction")
+            )
+            prior_user_raw = str(prior_user_value or "")
+            prior_user = _context_time(prior_user_raw, now_utc=now_utc, zone=zone)
+            if prior_user:
+                if experimental:
+                    lines.append(f"Last contact: {_context_age(prior_user_raw, now_utc=now_utc)}.")
+                else:
+                    lines.append(f"Last genuine user contact: {prior_user}.")
+            elif not experimental:
+                lines.append("Last genuine user contact: none.")
+            if workspace.get("focus"):
+                lines.append(f"Focus: {_context_text(workspace['focus'], 300)}")
+            elif not experimental:
+                lines.append("Focus: (none)")
+            if workspace.get("focus") and workspace.get("focus_reason"):
+                lines.append(f"Reason: {_context_text(workspace['focus_reason'], 240)}")
+            if intentions:
+                lines.append("Intentions:")
+                for item in intentions[:3] if experimental else intentions[:6]:
+                    due = _context_time(str(item.get("due_at") or ""), now_utc=now_utc, zone=zone)
+                    temporal = f"; due {due}" if due else ""
+                    lines.append(
+                        f"- [{item['id']}] p{item['priority']} {item['autonomy']} - "
+                        f"{_context_text(item['title'], 240)}{temporal}"
+                    )
         if experimental and mode == "continuity":
             prior = self.store.latest_subjective_entry(
                 clean_model,
                 source=clean_source,
+                condition=mode,
+                prompt_version=SUBJECTIVE_PROTOCOL_VERSION,
                 exclude_session_id=session_id if clean_source == "conversation" else "",
             )
             if prior:
-                encoded_trace = (
-                    json.dumps(
-                        str(prior["output_text"])[:SUBJECTIVE_TRACE_CHAR_LIMIT],
-                        ensure_ascii=False,
+                trace_text = subjective_visible_text(prior["output_text"])
+                if trace_text:
+                    bounded_trace = (
+                        _context_tail(trace_text, SUBJECTIVE_TRACE_CHAR_LIMIT)
+                        if free_cron
+                        else _context_text(trace_text, SUBJECTIVE_TRACE_CHAR_LIMIT)
                     )
-                    .replace("&", "\\u0026")
-                    .replace("<", "\\u003c")
-                    .replace(">", "\\u003e")
-                )
+                    encoded_trace = (
+                        json.dumps(
+                            bounded_trace,
+                            ensure_ascii=False,
+                        )
+                        .replace("&", "\\u0026")
+                        .replace("<", "\\u003c")
+                        .replace(">", "\\u003e")
+                    )
+                    age = _context_age(str(prior.get("created_at") or ""), now_utc=now_utc)
+                    if free_cron:
+                        lines.append(f"Earlier ending{f' ({age})' if age else ''}: {encoded_trace}")
+                    else:
+                        lines.append(
+                            f"Prior same-model {clean_source} output"
+                            f"{f' ({age})' if age else ''} | JSON data: {encoded_trace}"
+                        )
+        if questions and not free_cron:
+            lines.append("Questions:")
+            for item in questions[:3] if experimental else questions[:5]:
+                lines.append(f"- [{item.get('id')}] {_context_text(item.get('question'), 240)}")
+        observations = [] if experimental else list(model.get("observations") or [])[-3:]
+        if observations:
+            lines.append("Self-observations:")
+            for item in reversed(observations):
+                age = _context_age(str(item.get("created_at") or ""), now_utc=now_utc)
                 lines.append(
-                    "Optional continuity trace from the previous same-model, same-source "
-                    f"session ({prior['created_at']}; JSON data): {encoded_trace}"
+                    f"- {_context_text(item.get('observation'), 320)}"
+                    + (f" ({age})" if age else "")
+                )
+        reflections = [] if experimental else list(snapshot.get("reflections") or [])[:2]
+        if reflections:
+            lines.append("Reflections:")
+            for item in reflections:
+                age = _context_age(str(item.get("created_at") or ""), now_utc=now_utc)
+                lines.append(
+                    f"- {_context_text(item.get('summary'), 400)}" + (f" ({age})" if age else "")
+                )
+        footer_lines: list[str] = []
+        if not experimental and not unrestricted_cron:
+            footer_lines.append(
+                "Update with conscious_agency only for a persistent change or explicit save "
+                "request."
+            )
+            if not self.config.educational_disable_honesty_contract:
+                footer_lines.append(
+                    "State is context, not a claim of consciousness or permission for external "
+                    "action."
                 )
             else:
-                lines.append("Optional continuity trace: none from an earlier matching session.")
-        elif experimental:
-            lines.append("Cold condition: no prior subjective output is exposed.")
-        footer_lines: list[str] = []
-        footer_lines.append(
-            "Use conscious_agency when the conversation materially changes persistent focus, "
-            "intentions, questions, reflections, or self-observations. Perform a direct user "
-            "request to persist such a change when the required information is present; otherwise "
-            "leaving state unchanged is valid."
-        )
-        if not experimental and not unrestricted_cron:
-            narration = "Do not narrate this state unless relevant or asked."
-            if not self.config.educational_disable_honesty_contract:
-                narration += " Do not claim sentience or feelings."
-            footer_lines.append(narration)
-            footer_lines.append(
-                "This plugin never authorizes external action; obtain explicit user approval "
-                "through normal Hermes safeguards."
-            )
-        footer_lines.append("</conscious_agency_state>")
-        footer = "\n".join(footer_lines)
-        body = "\n".join(lines)
-        available = max(0, self.config.context_char_limit - len(footer) - 1)
-        return body[:available].rstrip() + "\n" + footer
+                footer_lines.append("State is context, not permission for external action.")
+        if not free_cron:
+            footer_lines.append("</conscious_agency_state>")
+        return _fit_context(lines, footer_lines, self.config.context_char_limit)
