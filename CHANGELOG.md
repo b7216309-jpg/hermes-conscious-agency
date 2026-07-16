@@ -2,6 +2,27 @@
 
 All notable changes are documented here.
 
+## 0.5.0 - 2026-07-16
+
+- Replaced the over-prescriptive Educational Lab frame with one compact, state-first research
+  context that leaves response style, topic, and whether state changes to the configured model.
+- Kept persistent focus, intentions, questions, self-observations, reflections, temporal
+  orientation, and prior-user-contact age visible in cold and continuity conditions.
+- Replaced synthetic drive-like control signals with factual state metrics: intention counts,
+  completion ratio, open-question count, and hours since genuine user contact.
+- Versioned new subjective samples as protocol 1.4 and limited continuity to a 600-character trace
+  from an earlier same-model, same-source session. Conversation and cron chains no longer
+  contaminate one another.
+- Reduced the model-facing tool and scheduled-cycle instructions to material state changes and the
+  minimum rules required by the configured policy; leaving state unchanged is explicitly valid.
+- Made a direct user request to persist focus, intentions, questions, reflections, or
+  self-observations an explicit model-tool trigger while keeping routine narration tool-free.
+- Counted intention statuses directly in SQLite so state metrics and tool status remain exact past
+  the 100-row list-page boundary.
+- Isolated Agency context and lifecycle telemetry from every unrelated Hermes cron job.
+- Classified tool failures structurally so successful JSON containing `"error": null` is no
+  longer recorded as a failed call.
+
 ## 0.4.2 - 2026-07-15
 
 - Added `cron_disable_thinking`, default off, to merge the Qwen/llama.cpp no-thinking request hint

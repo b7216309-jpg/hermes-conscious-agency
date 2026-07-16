@@ -384,6 +384,17 @@ class AgencyStore:
             rows = conn.execute(sql, params).fetchall()
         return [self._intention_row(row) for row in rows]
 
+    def intention_status_counts(self) -> dict[str, int]:
+        counts = {status: 0 for status in ("active", "blocked", "completed", "cancelled")}
+        with self.connection() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) FROM intentions GROUP BY status"
+            ).fetchall()
+        for status, count in rows:
+            if status in counts:
+                counts[status] = int(count)
+        return counts
+
     def update_intention(
         self,
         item_id: str,
@@ -596,16 +607,35 @@ class AgencyStore:
         item["metadata"] = AgencyStore._loads(item["metadata"], {})
         return item
 
-    def latest_subjective_entry(self, model_id: str) -> dict[str, Any] | None:
+    def latest_subjective_entry(
+        self,
+        model_id: str,
+        *,
+        source: str = "",
+        exclude_session_id: str = "",
+    ) -> dict[str, Any] | None:
         clean_model = model_id.strip()[:500] or "unknown"
+        clauses = ["model_id = ?"]
+        params: list[Any] = [clean_model]
+        if source.strip():
+            clean_source = source.strip().lower()
+            if clean_source not in {"cron", "conversation"}:
+                raise ValueError("subjective source must be cron or conversation")
+            clauses.append("source = ?")
+            params.append(clean_source)
+        if exclude_session_id.strip():
+            clauses.append("session_id != ?")
+            params.append(exclude_session_id.strip()[:500])
         with self.connection() as conn:
             row = conn.execute(
                 """SELECT id, created_at, capture_key, model_id, source, condition,
                           prompt_version, session_id, prior_entry_id, output_text,
                           output_sha256, metadata
                    FROM subjective_entries
-                   WHERE model_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1""",
-                (clean_model,),
+                   WHERE """
+                + " AND ".join(clauses)
+                + " ORDER BY created_at DESC, rowid DESC LIMIT 1",
+                params,
             ).fetchone()
         return self._subjective_row(row) if row else None
 
@@ -640,14 +670,15 @@ class AgencyStore:
         item_id, created = uuid.uuid4().hex[:16], iso_now()
         digest = hashlib.sha256(response.encode("utf-8")).hexdigest()
         with self._lock, self.connection() as conn:
-            # Keep the per-model link read and entry write in one cross-process write lock.
+            # Keep the per-model/source link read and entry write in one cross-process write lock.
             conn.execute("BEGIN IMMEDIATE")
             prior_id = None
             if clean_condition == "continuity":
                 prior_row = conn.execute(
                     """SELECT id FROM subjective_entries
-                       WHERE model_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1""",
-                    (clean_model,),
+                       WHERE model_id = ? AND source = ?
+                       ORDER BY created_at DESC, rowid DESC LIMIT 1""",
+                    (clean_model, clean_source),
                 ).fetchone()
                 prior_id = prior_row[0] if prior_row else None
             conn.execute(

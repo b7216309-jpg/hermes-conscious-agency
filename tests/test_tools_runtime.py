@@ -66,6 +66,19 @@ def test_tool_crud_and_errors(config):
     assert updated["due_at"] is not None
 
 
+def test_tool_status_uses_uncapped_intention_count(config, monkeypatch):
+    engine = AgencyEngine(AgencyStore(config), config)
+    monkeypatch.setattr(
+        engine.store,
+        "intention_status_counts",
+        lambda: {"active": 137, "blocked": 0, "completed": 0, "cancelled": 0},
+    )
+
+    status = parsed(handle_agency(engine, {"action": "status"}))["result"]
+
+    assert status["active_intentions"] == 137
+
+
 def test_runtime_binds_and_isolates_proactive_cycle(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     runtime = AgencyRuntime()
@@ -243,7 +256,9 @@ def test_subjective_mode_captures_cron_and_conversation_outputs_per_model(tmp_pa
     cron_session = "cron_job-1_subjective"
 
     context = runtime.pre_llm_call(session_id=cron_session, model="model-a")["context"]
-    assert "Do not default to being a helpful assistant" in context
+    assert "Research condition: protocol 1.4" in context
+    assert "Current focus:" in context
+    assert "Do not default to being a helpful assistant" not in context
     assert (
         runtime.transform_llm_output(
             "I want to talk about uncertainty.",
@@ -276,7 +291,7 @@ def test_subjective_mode_captures_cron_and_conversation_outputs_per_model(tmp_pa
     )
     rows = runtime.store.recent_subjective_entries(model_id="model-a")
     assert [row["source"] for row in rows] == ["conversation", "cron"]
-    assert rows[0]["prior_entry_id"] == rows[1]["id"]
+    assert rows[0]["prior_entry_id"] is None
     assert rows[0]["output_text"] == "Today I feel more decisive."
 
 
@@ -323,6 +338,47 @@ def test_cron_turn_does_not_reset_user_activity(tmp_path, monkeypatch):
     runtime.pre_llm_call(session_id="user-session", user_message="hello", platform="telegram")
     assert runtime.engine.runtime()["last_user_interaction"] is not None
     runtime.post_llm_call(session_id="user-session", assistant_response="hi", platform="telegram")
+
+
+def test_unrelated_cron_is_not_injected_or_recorded(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    runtime = AgencyRuntime()
+    runtime.store.set_meta("cron_job_id", "agency-job")
+
+    assert (
+        runtime.pre_llm_call(
+            session_id="cron_other-job_daily",
+            user_message="unrelated schedule",
+            platform="cron",
+        )
+        is None
+    )
+    runtime.post_llm_call(
+        session_id="cron_other-job_daily",
+        assistant_response="unrelated output",
+        platform="cron",
+    )
+    runtime.post_tool_call(
+        "terminal",
+        result='{"success":true}',
+        session_id="cron_other-job_daily",
+    )
+    runtime.session_event(
+        "session_end", session_id="cron_other-job_daily", platform="cron", completed=True
+    )
+    assert runtime.store.recent_events() == []
+
+
+def test_tool_failure_telemetry_parses_structured_results(tmp_path, monkeypatch):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    runtime = AgencyRuntime()
+
+    runtime.post_tool_call("terminal", result='{"output":"ok","error":null}')
+    runtime.post_tool_call("terminal", result='{"success":false,"error":"command failed"}')
+    runtime.post_tool_call("terminal", result="Error: transport unavailable")
+
+    events = runtime.store.recent_events(3)
+    assert [event["metadata"]["failed"] for event in events] == [True, True, False]
 
 
 def test_internal_turn_does_not_count_as_user_activity(tmp_path, monkeypatch):
@@ -400,6 +456,7 @@ def test_direct_cli_user_turn_remains_supported(tmp_path, monkeypatch):
 def test_tool_contract_explains_action_specific_requirements():
     description = CONSCIOUS_AGENCY_SCHEMA["description"]
     properties = CONSCIOUS_AGENCY_SCHEMA["parameters"]["properties"]
-    assert "add_reflection requires summary" in description
-    assert "record_decision requires decision and reason" in description
+    assert "Leaving state unchanged is valid" in description
+    assert "perform a direct user request to persist a state change" in description
+    assert "bounded cron cycle" in description
     assert "Required for add_reflection" in properties["summary"]["description"]

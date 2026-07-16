@@ -30,7 +30,7 @@ def test_state_and_ledgers_round_trip(config):
     assert store.recent_decisions(1)[0]["id"] == decision["id"]
 
 
-def test_subjective_journal_is_exact_idempotent_and_separated_by_model(config):
+def test_subjective_journal_is_exact_idempotent_and_separated_by_model_and_source(config):
     store = AgencyStore(config)
     first = store.add_subjective_entry(
         capture_key="cron:session-1:turn-1",
@@ -59,6 +59,15 @@ def test_subjective_journal_is_exact_idempotent_and_separated_by_model(config):
         session_id="session-2",
         output_text="I changed my mind.",
     )
+    third = store.add_subjective_entry(
+        capture_key="conversation:session-4:turn-4",
+        model_id="model-a",
+        source="conversation",
+        condition="continuity",
+        prompt_version="1.0",
+        session_id="session-4",
+        output_text="I changed it again.",
+    )
     other = store.add_subjective_entry(
         capture_key="cron:session-3:turn-3",
         model_id="model-b",
@@ -71,13 +80,21 @@ def test_subjective_journal_is_exact_idempotent_and_separated_by_model(config):
 
     assert duplicate["id"] == first["id"]
     assert duplicate["output_text"] == "  I keep the exact spacing.  "
-    assert second["prior_entry_id"] == first["id"]
+    assert second["prior_entry_id"] is None
+    assert third["prior_entry_id"] == second["id"]
     assert other["prior_entry_id"] is None
-    assert store.latest_subjective_entry("model-a")["id"] == second["id"]
-    assert len(store.recent_subjective_entries(model_id="model-a")) == 2
+    assert store.latest_subjective_entry("model-a")["id"] == third["id"]
+    assert store.latest_subjective_entry("model-a", source="cron")["id"] == first["id"]
+    assert (
+        store.latest_subjective_entry(
+            "model-a", source="conversation", exclude_session_id="session-4"
+        )["id"]
+        == second["id"]
+    )
+    assert len(store.recent_subjective_entries(model_id="model-a")) == 3
     summary = store.subjective_summary()
-    assert summary["entries"] == 3
-    assert summary["models"] == {"model-a": 2, "model-b": 1}
+    assert summary["entries"] == 4
+    assert summary["models"] == {"model-a": 3, "model-b": 1}
     assert summary["continuity_links"] == 1
 
 

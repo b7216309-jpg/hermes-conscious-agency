@@ -30,7 +30,7 @@ def handle_agency(engine: AgencyEngine, args: dict[str, Any], **kwargs: Any) -> 
                     "pause_reason": runtime.get("pause_reason", ""),
                     "proactive_messages_enabled": engine.config.allow_proactive_messages,
                     "focus": engine.workspace().get("focus", ""),
-                    "active_intentions": len(engine.store.list_intentions("active", 100)),
+                    "active_intentions": engine.store.intention_status_counts()["active"],
                 }
             )
         if action == "snapshot":

@@ -35,6 +35,27 @@ def _is_user_session(session_id: str, platform: str) -> bool:
     return not session.startswith(internal_prefixes) and surface not in internal_platforms
 
 
+def _tool_result_failed(result: Any) -> bool:
+    """Classify structured tool failures without treating ``error: null`` as an error."""
+
+    if isinstance(result, dict):
+        if result.get("success") is False:
+            return True
+        error = result.get("error")
+        return error is not None and error != "" and error is not False
+    if not isinstance(result, str):
+        return False
+    stripped = result.strip()
+    if not stripped:
+        return False
+    try:
+        parsed = json.loads(stripped)
+    except (TypeError, ValueError):
+        lowered = stripped.lower()
+        return lowered.startswith(("error:", "tool error:", "[error]"))
+    return _tool_result_failed(parsed)
+
+
 class AgencyRuntime:
     def __init__(self):
         self.config = load_config()
@@ -344,13 +365,17 @@ class AgencyRuntime:
         **_: Any,
     ) -> None:
         try:
-            failed = isinstance(result, str) and ('"error"' in result or "Error:" in result)
+            if _is_cron_session(session_id) and not self._is_agency_cron_session(session_id):
+                return
             self.store.add_event(
                 "tool_call",
                 session_id=session_id,
                 task_id=task_id,
                 summary=tool_name[:200],
-                metadata={"duration_ms": int(duration_ms or 0), "failed": failed},
+                metadata={
+                    "duration_ms": int(duration_ms or 0),
+                    "failed": _tool_result_failed(result),
+                },
             )
         except Exception as exc:
             logger.debug("conscious-agency post_tool_call failed: %s", exc)
@@ -367,7 +392,10 @@ class AgencyRuntime:
     ) -> dict[str, str] | None:
         try:
             current_user_turn = False
-            if _is_cron_session(session_id):
+            agency_cron = self._is_agency_cron_session(session_id)
+            if _is_cron_session(session_id) and not agency_cron:
+                return None
+            if agency_cron:
                 task = self._task_for_session(session_id)
                 if task:
                     self._fail_closed_cycle(
@@ -402,16 +430,17 @@ class AgencyRuntime:
             if (
                 self.config.inject_context
                 and self.config.enabled
-                and (_is_cron_session(session_id) or current_user_turn)
+                and (agency_cron or current_user_turn)
             ):
                 return {
                     "context": self.engine.context_block(
                         current_user_turn=current_user_turn,
                         unrestricted_cron=(
-                            self._is_agency_cron_session(session_id)
-                            and self.config.educational_allow_cron_tools
+                            agency_cron and self.config.educational_allow_cron_tools
                         ),
                         model_id=model,
+                        session_id=session_id,
+                        source="cron" if agency_cron else "conversation",
                     )
                 }
         except Exception as exc:
@@ -429,7 +458,7 @@ class AgencyRuntime:
         **_: Any,
     ) -> None:
         try:
-            if _is_cron_session(session_id):
+            if self._is_agency_cron_session(session_id):
                 self.store.add_event(
                     "cron_turn_finished",
                     session_id=session_id,
@@ -464,6 +493,11 @@ class AgencyRuntime:
         self, kind: str, session_id: str = "", platform: str = "", **kwargs: Any
     ) -> None:
         try:
+            if _is_cron_session(session_id):
+                if not self._is_agency_cron_session(session_id):
+                    return
+            elif not _is_user_session(session_id, platform):
+                return
             metadata = {
                 key: value
                 for key, value in kwargs.items()

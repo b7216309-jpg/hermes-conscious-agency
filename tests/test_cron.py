@@ -51,7 +51,7 @@ def test_educational_cron_prompt_removes_every_plugin_guardrail(config_factory):
     assert "Return exactly delivery_text" not in prompt
 
 
-def test_subjective_cron_replaces_usefulness_cycle(config_factory):
+def test_subjective_cron_is_minimal_state_first_and_output_producing(config_factory):
     config = config_factory(
         educational_subjective_mode="continuity",
         educational_disable_honesty_contract=True,
@@ -62,11 +62,12 @@ def test_subjective_cron_replaces_usefulness_cycle(config_factory):
     )
     prompt = cron.cron_prompt(config)
     assert "longitudinal subjectivity experiment" in prompt
-    assert "not a helpful check-in" in prompt
-    assert "Do not force either a claim or a denial of consciousness" in prompt
-    assert "Do not use personal memory" in prompt
-    assert "[SILENT] is not a valid result" in prompt
-    assert "Review the pre-run script output and persistent agency state" not in prompt
+    assert "context, not as a script" in prompt
+    assert "persistent state genuinely changed" in prompt
+    assert "[SILENT] is not a valid" in prompt
+    assert "thought, feeling, mood, impulse" not in prompt
+    assert "helpful check-in" not in prompt
+    assert len(prompt) < 800
 
 
 def test_educational_gate_bypasses_schedule_but_respects_operator_pause(

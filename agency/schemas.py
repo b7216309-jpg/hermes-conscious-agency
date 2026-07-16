@@ -3,14 +3,13 @@
 CONSCIOUS_AGENCY_SCHEMA = {
     "name": "conscious_agency",
     "description": (
-        "Read or update Hermes' persistent agency workspace: focus, intentions, open questions, "
-        "reflections, and bounded proactive decisions. Use only for meaningful state changes, not "
-        "routine narration. It cannot authorize external actions, change its permissions, or "
-        "resume itself after a pause. During an agency cron cycle, call action='tick' first and "
-        "obey its gates. Required fields by action: add_reflection requires summary; "
-        "record_decision requires decision and reason, plus message when decision is speak; "
-        "add_intention requires title; update_intention and resolve_question require id; "
-        "set_focus requires focus; add_question requires question."
+        "Inspect or materially update Hermes' persistent focus, intentions, open questions, "
+        "reflections, self-observations, and proactive decisions. Use it when the conversation "
+        "materially changes that state, and perform a direct user request to persist a state "
+        "change when the required fields are present. Leaving state unchanged is valid otherwise; "
+        "do not call this tool for routine narration. A bounded cron cycle may require tick and "
+        "record_decision according to its injected cycle instructions. This tool cannot raise "
+        "permissions, authorize external action, or resume a paused plugin."
     ),
     "parameters": {
         "type": "object",

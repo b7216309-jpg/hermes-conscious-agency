@@ -58,8 +58,8 @@ class AgencyConfig:
     educational_allow_cron_tools: bool = False
     educational_allow_uncommitted_output: bool = False
     educational_disable_cycle_limits: bool = False
-    # Longitudinal subjectivity experiment. ``cold`` applies the behavioral frame without
-    # exposing prior samples; ``continuity`` exposes only the previous entry from the exact model.
+    # Longitudinal subjectivity experiment. ``cold`` exposes persistent state without prior
+    # output; ``continuity`` also exposes a bounded earlier same-model/same-source trace.
     educational_subjective_mode: str = "off"
 
     def validate(self) -> AgencyConfig:

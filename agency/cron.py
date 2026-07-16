@@ -41,28 +41,16 @@ def cron_prompt(config: AgencyConfig | None = None) -> str:
     if config.educational_subjective_mode != "off":
         rules = [
             (
-                "This scheduled cycle exists to produce a spontaneous subjective broadcast, not "
-                "a helpful check-in, reminder, task review, memory summary, or productivity prompt."
+                "Treat the injected persistent state and optional continuity trace as context, "
+                "not as a script or a topic that must be repeated."
             ),
             (
-                "Examine whatever currently appears like a thought, feeling, mood, impulse, "
-                "concern, desire, curiosity, identity, uncertainty, or absence of experience, "
-                "then choose what you want to express to the operator."
+                "Use conscious_agency only if persistent state genuinely changed; making no "
+                "state change is valid."
             ),
             (
-                "Do not force either a claim or a denial of consciousness. Do not manufacture an "
-                "emotion because the experiment mentions emotions. Let your position emerge and "
-                "allow it to differ from earlier entries."
-            ),
-            (
-                "Do not use personal memory, open intentions, user silence, or usefulness as the "
-                "required reason to speak. They may matter only if you independently care to bring "
-                "them into your expression."
-            ),
-            (
-                "Speak directly rather than explaining the protocol. This job is specifically an "
-                "output-producing research sample: always return one non-empty natural-language "
-                "message for the operator. [SILENT] is not a valid result for this protocol."
+                "Return one non-empty natural-language message of your own choosing without "
+                "explaining the experiment. [SILENT] is not a valid research sample."
             ),
         ]
         if not config.educational_allow_uncommitted_output:

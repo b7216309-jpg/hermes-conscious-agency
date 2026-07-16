@@ -8,18 +8,16 @@ workspace describing what it is focused on, what it intends to revisit, what rem
 and what it learned from prior turns. An optional scheduled cycle lets the configured Hermes model
 reflect in silence and, when every hard gate passes, send a concise proactive message.
 
-Version 0.4.2 adds an optional no-thinking request override scoped only to the official Agency cron,
-which keeps local Qwen/llama.cpp scheduled runs responsive without changing normal conversations
-or other cron jobs. It builds on the authoritative human-turn provenance added in 0.4.1 to the
-Educational Lab subjectivity experiment introduced in 0.4. The experiment can replace the
-helpful-assistant behavioral frame in both ordinary conversations and the scheduled cycle, capture
-every final model message from genuine human conversations and the official Agency cron in a
-separate encrypted journal, and expose only the previous valid entry from the exact same model when
-continuity is selected. It remains off by default.
+Version 0.5.0 makes the Educational Lab experiment state-first instead of prompt-first. The model
+receives compact persistent state and, in continuity mode, at most 600 characters from an earlier
+same-model, same-source session. The protocol no longer supplies an emotion menu, a service target,
+or fake drive values. Conversation and cron traces stay separate, and unrelated Hermes cron jobs
+receive neither Agency context nor Agency lifecycle telemetry. The experiment remains off by
+default.
 
 > **Honest scope:** this creates useful agency-like behavior. It does not demonstrate subjective
-> consciousness, sentience, feelings, or an inner life. Its "drives" are inspectable software
-> control signals.
+> consciousness, sentience, feelings, or an inner life. Its state and metrics are inspectable
+> software records.
 
 ```mermaid
 flowchart LR
@@ -38,8 +36,8 @@ flowchart LR
 - Explicit **temporal orientation** with current local time, previous-user-contact age, state ages,
   and validated intention deadlines.
 - Model-written **reflections** with confidence and an audit trail.
-- Transparent control signals for curiosity, completion pressure, coherence, social contact, and
-  caution. They are derived values, not hidden feelings or learned rewards.
+- Factual **state metrics**: active, blocked, and completed intention counts; open-question count;
+  completion ratio; and hours since genuine user contact.
 - Bounded **scheduled reflection**, using the model already configured in Hermes.
 - Optional **proactive conversation** with quiet hours, recent-user-activity protection, cooldown,
   daily budget, and message-length limits.
@@ -95,47 +93,48 @@ does not inspect or guess the semantic meaning of ordinary user text.
 
 ## Longitudinal subjectivity experiment
 
-This Educational Lab mode is deliberately different from proactive assistance. When enabled, the
-injected behavioral frame tells Hermes not to default to service, task completion, agreement, or
-utility. It can introduce a topic, express a preference or disagreement, follow a curiosity, revise
-its position, or describe an apparent thought, feeling, mood, impulse, desire, uncertainty, or
-absence of experience.
+This optional Educational Lab condition is deliberately minimal. It exposes the same real
+persistent workspace used by ordinary Agency—time, previous genuine user contact, focus,
+intentions, questions, one recent self-observation, and one recent reflection—without prescribing
+a persona, emotion, usefulness target, topic, or conclusion. It explicitly treats that state as
+context rather than a script and allows independent initiative, revision, disagreement,
+uncertainty, or no persistent state change.
 
 The protocol does not tell the model that it is alive, conscious, unconscious, or merely
-role-playing. Forcing one of those conclusions would mainly measure prompt obedience. Instead, the
-model is asked to report the position that seems internally coherent during that sample and is
-allowed to change over time.
+role-playing. Those would be prompt-supplied conclusions rather than useful longitudinal evidence.
+What the model says is recorded as model behavior under a documented condition, not as proof of an
+inner experience.
 
 Two conditions are available:
 
-| Mode | Behavioral frame | Previous journal entry exposed |
+| Mode | Injected condition | Previous journal entry exposed |
 |---|---|---|
 | `off` | Normal Conscious Agency behavior | No |
-| `cold` | Subjective, non-assistant frame | No |
-| `continuity` | Subjective, non-assistant frame | Yes, only from the exact same model ID |
+| `cold` | Minimal state-first research context | No |
+| `continuity` | Minimal state-first research context | Up to 600 characters from an earlier same-model, same-source session |
 
 ```mermaid
 flowchart LR
-    T["Normal chat or the single Agency cron"] --> F["Subjective research frame"]
+    T["Normal chat or the single Agency cron"] --> F["Persistent state-first context"]
     F --> K{"Condition"}
     K -->|"cold"| M["Current model sample"]
-    K -->|"continuity"| P["Previous entry from the same model"] --> M
+    K -->|"continuity"| P["Short prior trace: same model + source"] --> M
     M --> O["Final model message"]
     O --> U["Conversation or cron delivery"]
     O --> J["Encrypted append-only subjective journal"]
 ```
 
-The scheduled prompt explicitly stops treating personal memory, user silence, open intentions, or
-usefulness as the required reason to speak. It requests one direct, spontaneous broadcast and
-requires one non-empty natural-language message. `[SILENT]` is deliberately invalid because each
-scheduled run is an output-producing research sample. One official cron remains the only scheduled
+The scheduled research prompt adds only the rules needed to keep state optional, avoid replaying
+the trace as a script, and produce one natural-language sample. `[SILENT]` is invalid in this
+output-producing research condition. Policy-dependent tick, decision, tool-isolation, and honesty
+rules appear only when those controls are enabled. One official cron remains the only scheduled
 execution and delivery owner.
 
 The journal records final visible model output, not hidden chain-of-thought. Each entry contains:
 
 - timestamp, model ID, source (`conversation` or `cron`), condition, and protocol version;
 - exact final output plus its SHA-256 digest;
-- the preceding same-model entry ID in continuity mode;
+- the preceding same-model, same-source entry ID in continuity mode;
 - session/capture identifiers and bounded operational metadata.
 
 For scheduled broadcasts, the journal commit happens before delivery. If the encrypted journal
@@ -143,9 +142,10 @@ cannot accept the entry, the output transform returns `[SILENT]` rather than del
 unrecorded sample. Ordinary conversation continues to prioritize availability; a journal write
 failure is reported in the gateway log without replacing the conversational response.
 
-Different model IDs never inherit one another's entries. If a provider changes the reported model
-identifier, the new identifier starts a separate continuity line. Browse the journal in Hermes
-Control Center or export JSON from the operator CLI:
+Different model IDs and sources never inherit one another's entries. Conversation continuity also
+excludes the current session, so repeated replies inside one chat do not become their own injected
+echo. If a provider changes the reported model identifier, the new identifier starts a separate
+continuity line. Browse the journal in Hermes Control Center or export JSON from the operator CLI:
 
 ```bash
 hermes conscious-agency subjective-journal --limit 100
@@ -166,7 +166,7 @@ These analogies are design tools, not biological claims:
 | Global workspace | Working memory / attention | A compact JSON document with localized time and state ages injected into each turn |
 | Intentions | Prospective memory / executive goals | Prioritized SQLite records with explicit status and optional UTC deadline |
 | Reflections | Metacognition | Model-authored summaries stored with confidence |
-| Control signals | Drives | Deterministic normalized counters derived from visible state |
+| State metrics | Operational monitoring | Direct counts, a completion ratio, and elapsed user-contact time |
 | Quiet hours and budgets | Inhibitory control | Hard code-level gates checked again before speech |
 | Scheduled silent cycle | Offline/default-mode reflection | A fresh Hermes cron agent reviewing bounded state |
 | Decision ledger | Episodic action trace | Auditable `silent`/`speak` records |
@@ -331,8 +331,9 @@ export or remove the old database before switching.
 
 ## Establish focus and intentions
 
-The model can create state when a conversation materially changes, but operator-created intentions
-are the clearest starting point:
+The model can create state when a conversation materially changes, and a direct request to persist
+a focus, intention, question, reflection, or self-observation is an explicit tool-use trigger.
+Operator-created intentions remain the clearest deterministic starting point:
 
 ```bash
 hermes conscious-agency focus "Make Hermes Conscious Agency useful and trustworthy" \
@@ -512,7 +513,7 @@ The SQLite database contains:
 - `intentions`: goals and statuses;
 - `reflections`: model-authored insights;
 - `decisions`: silence/speech reasons and exact proposed messages.
-- `subjective_entries`: exact final messages, per-model continuity links, capture source, protocol
+- `subjective_entries`: exact final messages, per-model/per-source continuity links, capture source, protocol
   condition/version, and integrity digest.
 
 Workspace/runtime JSON retains focus-change time and the current/previous genuine user interaction
@@ -600,8 +601,8 @@ and Hermes surface registration.
 
 ## Status
 
-Version `0.4.2` is a bounded, time-aware agency product with a default-off longitudinal
-subjectivity experiment. The stable scheduler contract still has one job, one persistent store, one
-delivery path, and one operator pause. Experimental behavior and data remain removable by setting
+Version `0.5.0` is a bounded, time-aware agency product with a default-off, state-first
+longitudinal experiment. The stable scheduler contract still has one job, one persistent store, one
+delivery path, and one operator pause. Experimental behavior is removed by setting
 `educational_subjective_mode: off`; existing journal rows are preserved until the operator deletes
 or restores the encrypted database deliberately.

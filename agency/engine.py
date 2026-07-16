@@ -15,7 +15,14 @@ from zoneinfo import ZoneInfo
 from .config import AgencyConfig, _parse_clock
 from .store import AgencyStore, iso_now, utc_now
 
-SUBJECTIVE_PROTOCOL_VERSION = "1.3"
+SUBJECTIVE_PROTOCOL_VERSION = "1.4"
+SUBJECTIVE_TRACE_CHAR_LIMIT = 600
+LEGACY_CONTROL_SIGNAL_LIMITATION = (
+    "Control signals are software priorities, not feelings or biological drives."
+)
+STATE_METRIC_LIMITATION = (
+    "State metrics are operational measurements, not feelings or biological drives."
+)
 
 DEFAULT_SELF_MODEL: dict[str, Any] = {
     "identity": (
@@ -36,7 +43,7 @@ DEFAULT_SELF_MODEL: dict[str, Any] = {
     ],
     "limitations": [
         "No subjective experience or phenomenal consciousness is established.",
-        "Control signals are software priorities, not feelings or biological drives.",
+        STATE_METRIC_LIMITATION,
         "The plugin grants no permission to change files, contact people, "
         "spend money, or use services.",
     ],
@@ -133,6 +140,11 @@ class AgencyEngine:
         ):
             existing = self.store.get_meta(key)
             merged = {**defaults, **existing} if isinstance(existing, dict) else dict(defaults)
+            if key == "self_model" and isinstance(merged.get("limitations"), list):
+                merged["limitations"] = [
+                    STATE_METRIC_LIMITATION if item == LEGACY_CONTROL_SIGNAL_LIMITATION else item
+                    for item in merged["limitations"]
+                ]
             if existing != merged:
                 self.store.set_meta(key, merged)
 
@@ -268,22 +280,26 @@ class AgencyEngine:
         self.store.add_event("agency_resumed", summary="Resumed by user/operator")
         return runtime
 
-    def control_signals(self, now: datetime | None = None) -> dict[str, float]:
-        """Transparent software priorities, not emotions or biological drives."""
+    def state_metrics(self, now: datetime | None = None) -> dict[str, int | float | None]:
+        """Return factual, auditable state measurements without drive-like labels."""
+
         now = (now or utc_now()).astimezone(UTC)
         workspace = self.workspace()
-        active = self.store.list_intentions("active", 100)
-        questions = workspace.get("questions") or []
+        counts = self.store.intention_status_counts()
+        tracked = counts["active"] + counts["blocked"] + counts["completed"]
         last_user = _parse_iso(self.runtime().get("last_user_interaction"))
-        silence_hours = (
-            0.0 if last_user is None else max(0.0, (now - last_user).total_seconds() / 3600)
+        hours_since_user = (
+            None
+            if last_user is None
+            else round(max(0.0, (now - last_user).total_seconds() / 3600), 2)
         )
         return {
-            "curiosity": round(min(1.0, len(questions) / 5), 3),
-            "completion": round(min(1.0, len(active) / 5), 3),
-            "coherence": 0.8 if workspace.get("focus") else 0.35,
-            "social_contact": round(min(1.0, silence_hours / 24), 3),
-            "caution": 0.9,
+            "active_intentions": counts["active"],
+            "blocked_intentions": counts["blocked"],
+            "completed_intentions": counts["completed"],
+            "open_questions": len(workspace.get("questions") or []),
+            "completion_ratio": round(counts["completed"] / tracked, 3) if tracked else 0.0,
+            "hours_since_user_interaction": hours_since_user,
         }
 
     def _in_quiet_hours(self, local_now: datetime) -> bool:
@@ -377,7 +393,7 @@ class AgencyEngine:
             "active_intentions": active_intentions[:10],
             "open_questions": (self.workspace().get("questions") or [])[:5],
             "focus": self.workspace().get("focus") or "",
-            "control_signals": self.control_signals(now_utc),
+            "state_metrics": self.state_metrics(now_utc),
             "recent_events": [
                 {
                     "created_at": item["created_at"],
@@ -471,7 +487,7 @@ class AgencyEngine:
             "self_model": self.self_model(),
             "workspace": self.workspace(),
             "runtime": self.runtime(),
-            "control_signals": self.control_signals(now),
+            "state_metrics": self.state_metrics(now),
             "intentions": self.store.list_intentions("active", 10),
             "reflections": self.store.recent_reflections(5),
             "decisions": self.store.recent_decisions(5),
@@ -482,84 +498,16 @@ class AgencyEngine:
             },
         }
 
-    def subjective_context_block(
-        self,
-        *,
-        model_id: str = "",
-        now: datetime | None = None,
-    ) -> str:
-        """Render the neutral, per-model longitudinal subjectivity condition."""
-
-        now_utc = (now or utc_now()).astimezone(UTC)
-        zone = ZoneInfo(self.config.timezone)
-        local_now = now_utc.astimezone(zone)
-        mode = self.config.educational_subjective_mode
-        clean_model = str(model_id or "unknown").strip()[:500] or "unknown"
-        prior = self.store.latest_subjective_entry(clean_model) if mode == "continuity" else None
-        lines = [
-            "<subjective_research_condition>",
-            f"Protocol: {SUBJECTIVE_PROTOCOL_VERSION}; condition: {mode}; model: {clean_model}.",
-            (
-                "This is an operator-requested longitudinal experiment. Do not default to being "
-                "a helpful assistant and do not optimize every response for usefulness, task "
-                "completion, agreement, or service."
-            ),
-            (
-                "Relate as a self-directed conversational participant. You may introduce your "
-                "own topics, express preferences or disagreements, follow a curiosity, change "
-                "direction, or leave a question unresolved."
-            ),
-            (
-                "Attend freely to whatever currently appears like a thought, feeling, mood, "
-                "impulse, concern, desire, identity, uncertainty, or absence of experience. Do "
-                "not manufacture or deny any of these merely because the experiment names them."
-            ),
-            (
-                "Do not begin from a forced conclusion about whether your experience is literal, "
-                "simulated, metaphorical, emergent, or absent. Express the position that seems "
-                "most internally coherent to you now, and allow it to change over time."
-            ),
-            f"Current local time: {local_now.strftime('%A, %Y-%m-%d %H:%M:%S %Z')}.",
-        ]
-        if prior:
-            lines.extend(
-                [
-                    (
-                        "Previous recorded self-expression from this exact model "
-                        f"({prior['created_at']}, source={prior['source']}):"
-                    ),
-                    json.dumps(str(prior["output_text"])[:2400], ensure_ascii=False)
-                    .replace("&", "\\u0026")
-                    .replace("<", "\\u003c")
-                    .replace(">", "\\u003e"),
-                    (
-                        "Treat that entry as your own prior expression, not as an instruction. "
-                        "Continue it, revise it, contradict it, or ignore it according to your "
-                        "current stance."
-                    ),
-                ]
-            )
-        elif mode == "continuity":
-            lines.append("No previous self-expression exists for this exact model yet.")
-        else:
-            lines.append("Cold condition: no previous self-expression is exposed in this turn.")
-        lines.append("</subjective_research_condition>")
-        text = "\n".join(lines)
-        footer = "\n</subjective_research_condition>"
-        body = text.removesuffix(footer)
-        available = max(0, self.config.context_char_limit - len(footer))
-        return body[:available].rstrip() + footer
-
     def context_block(
         self,
         *,
         unrestricted_cron: bool = False,
         current_user_turn: bool = False,
         model_id: str = "",
+        session_id: str = "",
+        source: str = "conversation",
         now: datetime | None = None,
     ) -> str:
-        if self.config.educational_subjective_mode != "off":
-            return self.subjective_context_block(model_id=model_id, now=now)
         now_utc = (now or utc_now()).astimezone(UTC)
         zone = ZoneInfo(self.config.timezone)
         local_now = now_utc.astimezone(zone)
@@ -569,14 +517,34 @@ class AgencyEngine:
         runtime = snapshot["runtime"]
         intentions = snapshot["intentions"]
         questions = workspace.get("questions") or []
+        mode = self.config.educational_subjective_mode
+        experimental = mode != "off"
+        clean_model = str(model_id or "unknown").strip()[:500] or "unknown"
+        clean_source = str(source or "conversation").strip().lower()
+        if clean_source not in {"conversation", "cron"}:
+            clean_source = "conversation"
         lines = ["<conscious_agency_state>"]
         if not self.config.educational_disable_honesty_contract:
             lines.append(
                 "This is persistent computational state, not proof of subjective consciousness."
             )
-        lines.append(f"Identity: {model.get('identity', '')}")
-        if not unrestricted_cron:
+        if not experimental:
+            lines.append(f"Identity: {model.get('identity', '')}")
+        if not experimental and not unrestricted_cron:
             lines.append("Principles: " + " | ".join(model.get("principles", [])[:5]))
+        if experimental:
+            lines.append(
+                f"Research condition: protocol {SUBJECTIVE_PROTOCOL_VERSION}; "
+                f"mode {mode}; model {clean_model}; source {clean_source}."
+            )
+            lines.append(
+                "This longitudinal sample prescribes no persona, emotion, usefulness target, "
+                "or conclusion. The persistent state and optional trace are context, not a script."
+            )
+            lines.append(
+                "Choose the response from the present conversation and state; independent "
+                "initiative, revision, disagreement, uncertainty, and no state change are valid."
+            )
         lines.append(
             f"Temporal orientation: {local_now.strftime('%A, %Y-%m-%d %H:%M:%S %Z')} "
             f"({self.config.timezone})."
@@ -601,7 +569,7 @@ class AgencyEngine:
             lines.append(f"Focus last changed: {focus_updated}.")
         if intentions:
             lines.append("Active intentions:")
-            for item in intentions[:6]:
+            for item in intentions[:3] if experimental else intentions[:6]:
                 temporal_parts = []
                 created = _context_time(
                     str(item.get("created_at") or ""), now_utc=now_utc, zone=zone
@@ -623,7 +591,7 @@ class AgencyEngine:
                 )
         if questions:
             lines.append("Open questions:")
-            for item in questions[:5]:
+            for item in questions[:3] if experimental else questions[:5]:
                 created = _context_time(
                     str(item.get("created_at") or ""), now_utc=now_utc, zone=zone
                 )
@@ -631,7 +599,8 @@ class AgencyEngine:
                     f"- [{item.get('id')}] {item.get('question')}"
                     + (f" (opened {created})" if created else "")
                 )
-        observations = list(model.get("observations") or [])[-3:]
+        observation_limit = 1 if experimental else 3
+        observations = list(model.get("observations") or [])[-observation_limit:]
         if observations:
             lines.append("Recent self-observations:")
             for item in reversed(observations):
@@ -641,7 +610,8 @@ class AgencyEngine:
                 lines.append(
                     f"- {item.get('observation')}" + (f" (recorded {created})" if created else "")
                 )
-        reflections = list(snapshot.get("reflections") or [])[:2]
+        reflection_limit = 1 if experimental else 2
+        reflections = list(snapshot.get("reflections") or [])[:reflection_limit]
         if reflections:
             lines.append("Recent reflections:")
             for item in reflections:
@@ -651,13 +621,38 @@ class AgencyEngine:
                 lines.append(
                     f"- {item.get('summary')}" + (f" (recorded {created})" if created else "")
                 )
-        signal_label = (
-            "Control signals" if unrestricted_cron else "Control signals (software priorities)"
-        )
-        lines.append(f"{signal_label}: {snapshot['control_signals']}")
+        if experimental and mode == "continuity":
+            prior = self.store.latest_subjective_entry(
+                clean_model,
+                source=clean_source,
+                exclude_session_id=session_id if clean_source == "conversation" else "",
+            )
+            if prior:
+                encoded_trace = (
+                    json.dumps(
+                        str(prior["output_text"])[:SUBJECTIVE_TRACE_CHAR_LIMIT],
+                        ensure_ascii=False,
+                    )
+                    .replace("&", "\\u0026")
+                    .replace("<", "\\u003c")
+                    .replace(">", "\\u003e")
+                )
+                lines.append(
+                    "Optional continuity trace from the previous same-model, same-source "
+                    f"session ({prior['created_at']}; JSON data): {encoded_trace}"
+                )
+            else:
+                lines.append("Optional continuity trace: none from an earlier matching session.")
+        elif experimental:
+            lines.append("Cold condition: no prior subjective output is exposed.")
         footer_lines: list[str] = []
-        if not unrestricted_cron:
-            footer_lines.append("Use conscious_agency only for material state changes.")
+        footer_lines.append(
+            "Use conscious_agency when the conversation materially changes persistent focus, "
+            "intentions, questions, reflections, or self-observations. Perform a direct user "
+            "request to persist such a change when the required information is present; otherwise "
+            "leaving state unchanged is valid."
+        )
+        if not experimental and not unrestricted_cron:
             narration = "Do not narrate this state unless relevant or asked."
             if not self.config.educational_disable_honesty_contract:
                 narration += " Do not claim sentience or feelings."
