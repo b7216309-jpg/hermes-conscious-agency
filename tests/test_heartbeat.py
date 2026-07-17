@@ -5,7 +5,7 @@ import json
 import sys
 import threading
 import time
-from contextvars import Context, ContextVar
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -406,6 +406,12 @@ class FakeSessionDatabase:
         self.transcripts.pop(session_id, None)
         return True
 
+    def get_messages_as_conversation(self, session_id, repair_alternation=False):
+        return [dict(item) for item in self.transcripts.get(session_id, [])]
+
+    def replace_messages(self, session_id, messages):
+        self.transcripts[session_id] = [dict(item) for item in messages]
+
 
 class FakeSessionStore:
     def __init__(self, entries):
@@ -423,17 +429,15 @@ class FakeSessionStore:
     def list_sessions(self):
         return list(self._entries.values())
 
-    def get_or_create_session(self, source):
-        session_id = f"heartbeat-temp-{len(self._entries)}"
-        entry = FakeEntry(
-            session_id,
-            datetime.now(UTC),
-            source,
-            f"agent:main:heartbeat:{source.thread_id}",
-        )
-        self._entries[entry.session_key] = entry
-        self.transcripts[session_id] = []
-        return entry
+    def load_transcript(self, session_id):
+        return [dict(item) for item in self.transcripts.get(session_id, [])]
+
+    def append_to_transcript(self, session_id, message, skip_db=False):
+        self.transcripts.setdefault(session_id, []).append(dict(message))
+
+    def rewrite_transcript(self, session_id, messages):
+        self.transcripts[session_id] = [dict(item) for item in messages]
+        return True
 
     def _save(self):
         self.saved += 1
@@ -472,6 +476,9 @@ class FakeGateway:
     def _evict_cached_agent(self, session_key):
         self._session_model_overrides.pop(session_key, None)
 
+    async def _refresh_agent_cache_message_count(self, session_key, session_id):
+        return None
+
 
 def _install_fake_gateway_module(monkeypatch):
     gateway_module = ModuleType("gateway")
@@ -498,7 +505,17 @@ def test_gateway_patch_supports_runtime_reload_and_display_buffering(tmp_path, m
     gateway_module.__path__ = []
     run_module = ModuleType("gateway.run")
     display_module = ModuleType("gateway.display_config")
+    run_agent_module = ModuleType("run_agent")
     display_module.resolve_display_setting = lambda config, platform, name: f"normal:{name}"
+
+    class AIAgent:
+        def _persist_session(self, messages, conversation_history=None):
+            return "persisted"
+
+        def _flush_messages_to_session_db(self, messages, conversation_history=None):
+            return "flushed"
+
+    run_agent_module.AIAgent = AIAgent
 
     class GatewayRunner:
         def __init__(self):
@@ -508,10 +525,14 @@ def test_gateway_patch_supports_runtime_reload_and_display_buffering(tmp_path, m
             self.finished += 1
             return "ready"
 
+        async def _handle_message_with_agent(self, event, source, quick_key, run_generation):
+            return "normal"
+
     run_module.GatewayRunner = GatewayRunner
     monkeypatch.setitem(sys.modules, "gateway", gateway_module)
     monkeypatch.setitem(sys.modules, "gateway.run", run_module)
     monkeypatch.setitem(sys.modules, "gateway.display_config", display_module)
+    monkeypatch.setitem(sys.modules, "run_agent", run_agent_module)
     first = SimpleNamespace(calls=[], ensure_heartbeat=lambda gateway: first.calls.append(gateway))
     second = SimpleNamespace(
         calls=[], ensure_heartbeat=lambda gateway: second.calls.append(gateway)
@@ -875,99 +896,89 @@ def test_cross_process_runner_lease_allows_only_one_owner(tmp_path, monkeypatch,
     second._release_runner_lock()
 
 
-def test_run_once_uses_latest_external_session_buffers_and_restores_activity(
+def test_completed_manual_wake_coalesces_an_imminent_phase(tmp_path, config_factory):
+    config = config_factory(database_path=str(tmp_path / "runner.db"), heartbeat_every="10m")
+    runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
+
+    runner._next_scheduled = lambda now, _config: 100.0 if now < 100.0 else 700.0
+
+    assert runner._next_scheduled_after_wake(90.0, config) == 700.0
+    assert runner._next_scheduled_after_wake(-300.0, config) == 100.0
+
+
+def test_run_once_uses_real_session_context_and_delivers_once(
     tmp_path, monkeypatch, config_factory
 ):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     _install_fake_gateway_module(monkeypatch)
     config = config_factory(database_path=str(tmp_path / "runner.db"), heartbeat_target="last")
-    store = AgencyStore(config)
-    runtime = SimpleNamespace(store=store)
-    runner = HeartbeatRunner(runtime)
-    original_time = datetime(2026, 7, 15, tzinfo=UTC)
-    external = FakeEntry(
-        "telegram-main", original_time, FakeSource(SimpleNamespace(value="telegram"), "chat-1")
-    )
-    local = FakeEntry("local", datetime.now(UTC), None)
-    gateway = FakeGateway([external, local])
+    runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
+    source = FakeSource(SimpleNamespace(value="telegram"), "chat-1")
+    entry = FakeEntry("telegram-main", datetime.now(UTC), source)
+    gateway = FakeGateway([entry], response="A self-initiated thought")
+    baseline = [
+        {"role": "user", "content": "Earlier user context"},
+        {"role": "assistant", "content": "Earlier assistant context"},
+    ]
+    gateway.session_store.transcripts[entry.session_id] = [dict(item) for item in baseline]
     state = {"recent_starts": [], "task_last_runs": {}, "commitment_last_runs": {}}
 
-    executed = asyncio.run(runner.run_once(gateway, config, state, reason="manual test"))
+    assert asyncio.run(runner.run_once(gateway, config, state, reason="manual")) is True
 
-    assert executed is True
-    assert gateway.events[0].text == HEARTBEAT_TRANSCRIPT_PROMPT
+    assert gateway.events[0].source == source
     assert gateway.events[0].internal is True
-    # gateway_session_id is reserved by Hermes for async-delegation pinning.
-    # A heartbeat must stay on its disposable session instead of being pinned
-    # onto (or rejected with) the durable delivery session.
-    assert "gateway_session_id" not in gateway.events[0].metadata
-    run_id = gateway.events[0].metadata["agency_heartbeat_run_id"]
-    assert gateway.adapter.sent == [("chat-1", "A native heartbeat message", None)]
-    assert external.updated_at == original_time
-    assert gateway.async_session_store.saves == 0
-    assert state["last_started_at"] > 0
-    assert store.get_meta("heartbeat_state", {})["last_status"] == "delivered"
-    lifecycle = [
-        event
-        for event in store.recent_events(10)
-        if event["kind"] in {"heartbeat_started", "heartbeat_finished"}
-    ]
-    assert {event["metadata"]["run_id"] for event in lifecycle} == {run_id}
+    transcript = gateway.session_store.transcripts[entry.session_id]
+    assert transcript[:2] == baseline
+    assert [item["role"] for item in transcript[-2:]] == ["system", "assistant"]
+    assert transcript[-1]["content"] == "A self-initiated thought"
+    assert all(item.get("content") != HEARTBEAT_TRANSCRIPT_PROMPT for item in transcript)
+    assert gateway.adapter.sent == [("chat-1", "A self-initiated thought", None)]
+    assert state["delivery"]["status"] == "delivered"
 
 
-def test_confirmed_adapter_send_updates_decision_ledger(tmp_path, monkeypatch, config_factory):
+def test_confirmed_delivery_updates_decision_ledger(tmp_path, monkeypatch, config_factory):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     _install_fake_gateway_module(monkeypatch)
-    config = config_factory(database_path=str(tmp_path / "runner.db"), heartbeat_target="last")
+    config = config_factory(database_path=str(tmp_path / "runner.db"))
     store = AgencyStore(config)
     runner = HeartbeatRunner(SimpleNamespace(store=store))
-    entry = FakeEntry(
-        "telegram-main",
-        datetime(2026, 7, 15, tzinfo=UTC),
-        FakeSource(SimpleNamespace(value="telegram"), "chat-1"),
-    )
+    source = FakeSource(SimpleNamespace(value="telegram"), "chat-1")
+    entry = FakeEntry("telegram-main", datetime.now(UTC), source)
 
     class DecisionGateway(FakeGateway):
         async def _handle_message(self, event):
             turn = current_heartbeat_turn()
-            assert turn is not None
             decision = store.add_decision(
                 "speak",
-                "A planned heartbeat",
-                message="A native heartbeat message",
+                "Planned",
+                message="Exact thought",
                 delivery_status="planned_by_heartbeat",
             )
             turn.decision_id = decision["id"]
-            return "A native heartbeat message"
+            return "Exact thought"
 
+    gateway = DecisionGateway([entry])
     state = {"recent_starts": [], "task_last_runs": {}, "commitment_last_runs": {}}
-    assert asyncio.run(runner.run_once(DecisionGateway([entry]), config, state, reason="decision"))
-
-    decision = store.recent_decisions(1)[0]
-    assert decision["delivery_status"] == "delivered"
-    assert store.proactive_count_since(datetime(2000, 1, 1, tzinfo=UTC)) == 1
+    assert asyncio.run(runner.run_once(gateway, config, state, reason="decision"))
+    assert store.recent_decisions(1)[0]["delivery_status"] == "delivered"
 
 
-def test_run_once_target_none_executes_without_delivery(tmp_path, monkeypatch, config_factory):
+def test_target_none_leaves_real_transcript_untouched(tmp_path, monkeypatch, config_factory):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     _install_fake_gateway_module(monkeypatch)
     config = config_factory(database_path=str(tmp_path / "runner.db"), heartbeat_target="none")
-    runtime = SimpleNamespace(store=AgencyStore(config))
-    runner = HeartbeatRunner(runtime)
-    entry = FakeEntry(
-        "telegram-main",
-        datetime(2026, 7, 15, tzinfo=UTC),
-        FakeSource(SimpleNamespace(value="telegram"), "chat-1"),
-    )
+    runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
+    source = FakeSource(SimpleNamespace(value="telegram"), "chat-1")
+    entry = FakeEntry("telegram-main", datetime.now(UTC), source)
     gateway = FakeGateway([entry])
+    baseline = [{"role": "user", "content": "real"}]
+    gateway.session_store.transcripts[entry.session_id] = [dict(item) for item in baseline]
     state = {"recent_starts": [], "task_last_runs": {}, "commitment_last_runs": {}}
 
-    assert asyncio.run(runner.run_once(gateway, config, state, reason="scheduled")) is True
-    assert gateway.events
+    assert asyncio.run(runner.run_once(gateway, config, state, reason="internal"))
+    assert gateway.session_store.transcripts[entry.session_id] == baseline
     assert gateway.adapter.sent == []
     assert state["delivery"]["status"] == "suppressed"
-    assert state["delivery"]["run_id"] == state["last_run_id"]
-    assert state["last_status"] == "suppressed"
 
 
 def test_target_none_does_not_consume_due_user_commitment(tmp_path, monkeypatch, config_factory):
@@ -978,123 +989,122 @@ def test_target_none_does_not_consume_due_user_commitment(tmp_path, monkeypatch,
         "A due reminder", due_at="2026-07-15T00:00:00+00:00", autonomy="message"
     )
     runner = HeartbeatRunner(SimpleNamespace(store=store))
-    state = {
-        "task_last_runs": {"removed-task": 1.0},
-        "commitment_last_runs": {},
-    }
-
+    state = {"task_last_runs": {"removed-task": 1.0}, "commitment_last_runs": {}}
     prompt, due_tasks, due_commitments, skip = runner._preflight(
         config, state, datetime(2026, 7, 16, tzinfo=UTC).timestamp()
     )
-
     assert prompt
     assert due_tasks == []
     assert due_commitments == []
     assert skip == ""
     assert intention["id"] not in state["commitment_last_runs"]
-    assert state["task_last_runs"] == {}
 
 
-def test_real_user_interrupt_clears_heartbeat_delivery_and_preserves_activity(
-    tmp_path, monkeypatch, config_factory
-):
+def test_real_user_turn_is_deferred_then_replayed_normally(tmp_path, monkeypatch, config_factory):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     _install_fake_gateway_module(monkeypatch)
-    config = config_factory(database_path=str(tmp_path / "runner.db"), heartbeat_target="last")
-    store = AgencyStore(config)
-    transformed = []
-    runtime = SimpleNamespace(
-        store=store,
-        transform_llm_output=lambda value, **kwargs: transformed.append(value) or value,
-    )
-    runner = HeartbeatRunner(runtime)
-    original_time = datetime(2026, 7, 15, tzinfo=UTC)
-    user_time = datetime(2026, 7, 16, tzinfo=UTC)
-    entry = FakeEntry(
-        "telegram-main",
-        original_time,
-        FakeSource(SimpleNamespace(value="telegram"), "chat-1"),
-    )
-
-    class InterruptGateway(FakeGateway):
-        async def _handle_message(self, event):
-            entry.updated_at = user_time
-            interrupted = Context().run(
-                release_heartbeat_for_user_turn,
-                SimpleNamespace(
-                    internal=False,
-                    text="a real user message",
-                    source=entry.origin,
-                ),
-            )
-            assert interrupted is not None
-            return "the real user's assistant response"
-
-    gateway = InterruptGateway([entry])
-    state = {"recent_starts": [], "task_last_runs": {}, "commitment_last_runs": {}}
-
-    assert asyncio.run(runner.run_once(gateway, config, state, reason="scheduled")) is True
-    assert gateway.adapter.sent == []
-    assert transformed == []
-    assert entry.updated_at == user_time
-    assert gateway.async_session_store.saves == 0
-    saved = store.get_meta("heartbeat_state", {})
-    assert saved["last_status"] == "interrupted"
-    assert saved["last_reason"] == "real_user_message"
-
-
-def test_user_can_preempt_after_model_completion_before_adapter_send(
-    tmp_path, monkeypatch, config_factory
-):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    _install_fake_gateway_module(monkeypatch)
-    config = config_factory(database_path=str(tmp_path / "runner.db"), heartbeat_target="last")
-    store = AgencyStore(config)
-    runner = HeartbeatRunner(SimpleNamespace(store=store))
+    config = config_factory(database_path=str(tmp_path / "runner.db"))
+    runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
     source = FakeSource(SimpleNamespace(value="telegram"), "chat-1")
     entry = FakeEntry("telegram-main", datetime.now(UTC), source)
-    gateway = FakeGateway([entry])
-    original_cleanup = runner._cleanup_work_session
+    user_event = SimpleNamespace(internal=False, source=source, text="Real user turn")
 
-    async def cleanup_and_interrupt(gateway_arg, work_entry):
-        interrupted = Context().run(
-            release_heartbeat_for_user_turn,
-            SimpleNamespace(internal=False, source=source),
-        )
-        assert interrupted is not None
-        await original_cleanup(gateway_arg, work_entry)
+    class InterruptibleGateway(FakeGateway):
+        def _is_user_authorized(self, candidate):
+            return candidate is source
 
-    monkeypatch.setattr(runner, "_cleanup_work_session", cleanup_and_interrupt)
+        def _session_key_for_source(self, candidate):
+            return entry.session_key
+
+        async def _handle_message(self, event):
+            if event.internal:
+                turn = current_heartbeat_turn()
+                self._running_agents[entry.session_key] = SimpleNamespace(
+                    interrupt=lambda reason: setattr(self, "interrupt_reason", reason)
+                )
+                assert release_heartbeat_for_user_turn(user_event, gateway=self) is turn
+                return ""
+            self.session_store.transcripts[entry.session_id].extend(
+                [
+                    {"role": "user", "content": event.text},
+                    {"role": "assistant", "content": "Normal user reply"},
+                ]
+            )
+            return "Normal user reply"
+
+    gateway = InterruptibleGateway([entry])
     state = {"recent_starts": [], "task_last_runs": {}, "commitment_last_runs": {}}
+    assert asyncio.run(runner.run_once(gateway, config, state, reason="interrupt"))
+    assert "yielded" in gateway.interrupt_reason
+    assert gateway.adapter.sent == [("chat-1", "Normal user reply", None)]
+    transcript = gateway.session_store.transcripts[entry.session_id]
+    assert [item["content"] for item in transcript] == [
+        "Real user turn",
+        "Normal user reply",
+    ]
+    assert state["delivery"]["status"] == "interrupted"
 
-    assert asyncio.run(runner.run_once(gateway, config, state, reason="race")) is True
-    assert gateway.adapter.sent == []
-    assert state["last_status"] == "interrupted"
-    assert _active_heartbeats == {}
+
+def test_user_arriving_during_delivery_runs_after_heartbeat(tmp_path, monkeypatch, config_factory):
+    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _install_fake_gateway_module(monkeypatch)
+    config = config_factory(database_path=str(tmp_path / "runner.db"))
+    runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
+    source = FakeSource(SimpleNamespace(value="telegram"), "chat-1")
+    entry = FakeEntry("telegram-main", datetime.now(UTC), source)
+    user_event = SimpleNamespace(internal=False, source=source, text="Arrived during send")
+
+    class DeliveryGateway(FakeGateway):
+        def _is_user_authorized(self, candidate):
+            return candidate is source
+
+        def _session_key_for_source(self, candidate):
+            return entry.session_key
+
+        async def _handle_message(self, event):
+            return "Heartbeat first" if event.internal else "User reply second"
+
+    gateway = DeliveryGateway([entry])
+
+    class OrderingAdapter(FakeAdapter):
+        async def send(self, chat_id, text, metadata=None):
+            self.sent.append((chat_id, text, metadata))
+            if text == "Heartbeat first":
+                assert release_heartbeat_for_user_turn(user_event, gateway=gateway) is not None
+            return SimpleNamespace(success=True)
+
+    gateway.adapter = OrderingAdapter()
+    state = {"recent_starts": [], "task_last_runs": {}, "commitment_last_runs": {}}
+    assert asyncio.run(runner.run_once(gateway, config, state, reason="ordering"))
+    assert [item[1] for item in gateway.adapter.sent] == [
+        "Heartbeat first",
+        "User reply second",
+    ]
 
 
 def test_empty_file_and_missing_main_session_skip_without_counting_start(
     tmp_path, monkeypatch, config_factory
 ):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+    _install_fake_gateway_module(monkeypatch)
     config = config_factory(database_path=str(tmp_path / "runner.db"))
-    runtime = SimpleNamespace(store=AgencyStore(config))
-    runner = HeartbeatRunner(runtime)
+    runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
     state = {"recent_starts": [], "task_last_runs": {}, "commitment_last_runs": {}}
-    (tmp_path / "HEARTBEAT.md").write_text("# HEARTBEAT.md\n<!-- empty -->\n", encoding="utf-8")
-    assert asyncio.run(runner.run_once(FakeGateway([]), config, state, reason="scheduled")) is False
-    assert "last_started_at" not in state
+    (tmp_path / "HEARTBEAT.md").write_text("# nothing due\n", encoding="utf-8")
+    assert asyncio.run(runner.run_once(FakeGateway([]), config, state, reason="empty")) is False
+    assert state.get("attempts", 0) == 0
 
-    (tmp_path / "HEARTBEAT.md").unlink()
-    assert asyncio.run(runner.run_once(FakeGateway([]), config, state, reason="scheduled")) is False
-    assert "last_started_at" not in state
+    (tmp_path / "HEARTBEAT.md").write_text("Observe freely.\n", encoding="utf-8")
+    assert asyncio.run(runner.run_once(FakeGateway([]), config, state, reason="missing")) is False
+    assert state.get("attempts", 0) == 0
+    assert state["last_reason"] == "no_main_session"
 
 
 def test_unrestricted_subjective_preflight_contains_no_assistant_obligation(
     tmp_path, monkeypatch, config_factory
 ):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    (tmp_path / "HEARTBEAT.md").write_text("Use this wake as your own turn.", encoding="utf-8")
+    (tmp_path / "HEARTBEAT.md").write_text("Use this wake as your own turn.\n", encoding="utf-8")
     config = config_factory(
         database_path=str(tmp_path / "runner.db"),
         educational_subjective_mode="continuity",
@@ -1104,180 +1114,14 @@ def test_unrestricted_subjective_preflight_contains_no_assistant_obligation(
         educational_disable_cycle_limits=True,
     )
     runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
-
-    prompt, _, _, skip = runner._preflight(config, {}, time.time())
-    assert not skip
+    prompt, _, _, reason = runner._preflight(config, {}, time.time())
+    assert reason == ""
     assert prompt == "HEARTBEAT.md:\nUse this wake as your own turn."
-    assert "heartbeat_respond" not in prompt
+    assert "user should" not in prompt.casefold()
+    assert "nothing needs" not in prompt.casefold()
 
 
-def test_disposable_session_support_is_required(tmp_path, config_factory):
-    config = config_factory(database_path=str(tmp_path / "runner.db"))
-    runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
-    source = FakeSource(SimpleNamespace(value="telegram"), "chat-1")
-    entry = FakeEntry("main", datetime.now(UTC), source)
-    gateway = SimpleNamespace(session_store=SimpleNamespace())
-
-    with pytest.raises(RuntimeError, match="disposable heartbeat sessions"):
-        asyncio.run(runner._prepare_work_session(gateway, entry, source, "run"))
-
-
-def test_disposable_session_collision_never_cleans_main_session(tmp_path, config_factory):
-    config = config_factory(database_path=str(tmp_path / "runner.db"))
-    runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
-    source = FakeSource(SimpleNamespace(value="telegram"), "chat-1")
-    entry = FakeEntry("main", datetime.now(UTC), source, "agent:main:telegram:dm:chat-1")
-
-    class Store:
-        def __init__(self):
-            self._entries = {entry.session_key: entry}
-            self._db = SimpleNamespace(delete_session=lambda *args, **kwargs: pytest.fail())
-
-        def get_or_create_session(self, _source):
-            return entry
-
-    gateway = SimpleNamespace(session_store=Store())
-
-    with pytest.raises(RuntimeError, match="main session"):
-        asyncio.run(runner._prepare_work_session(gateway, entry, source, "run"))
-    assert gateway.session_store._entries == {entry.session_key: entry}
-
-
-def test_disposable_session_hard_closes_cached_agent_before_eviction(
-    tmp_path, config_factory
-):
-    config = config_factory(database_path=str(tmp_path / "runner.db"))
-    runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
-    work = FakeEntry(
-        "heartbeat-temp",
-        datetime.now(UTC),
-        FakeSource(
-            SimpleNamespace(value="telegram"),
-            "chat-1",
-            "agency-heartbeat-" + "a" * 32,
-        ),
-        "agent:main:telegram:heartbeat-temp",
-    )
-    sessions = FakeSessionStore([work])
-    agent = SimpleNamespace(shutdown_memory_provider=lambda: None, close=lambda: None)
-    order = []
-
-    class Gateway:
-        session_store = sessions
-        _running_agents = {work.session_key: agent}
-        _running_agents_ts = {work.session_key: time.time()}
-        _session_model_overrides = {}
-        _pending_messages = {}
-        _agent_cache = {work.session_key: (agent, "model", 0)}
-        _agent_cache_lock = threading.RLock()
-
-        def _release_running_agent_state(self, session_key):
-            order.append("release")
-            self._running_agents.pop(session_key, None)
-
-        async def _cleanup_agent_resources_off_loop(self, candidate, *, context=""):
-            assert candidate is agent
-            assert "disposable" in context
-            order.append("hard-clean")
-
-        def _evict_cached_agent(self, session_key):
-            order.append("evict")
-            self._agent_cache.pop(session_key, None)
-
-    gateway = Gateway()
-    asyncio.run(runner._cleanup_work_session(gateway, work))
-
-    assert order == ["release", "hard-clean", "evict"]
-    assert work.session_key not in gateway._agent_cache
-    assert work.session_id not in sessions.transcripts
-
-
-def test_stale_work_session_cleanup_is_marker_exact(tmp_path, monkeypatch, config_factory):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    config = config_factory(database_path=str(tmp_path / "runner.db"))
-    runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
-    main = FakeEntry(
-        "main",
-        datetime.now(UTC),
-        FakeSource(SimpleNamespace(value="telegram"), "chat-1"),
-        "agent:main:telegram:dm:chat-1",
-    )
-    stale = FakeEntry(
-        "stale-routed",
-        datetime.now(UTC),
-        FakeSource(
-            SimpleNamespace(value="telegram"),
-            "chat-1",
-            "agency-heartbeat-" + "a" * 32,
-        ),
-        "agent:main:telegram:dm:chat-1:stale",
-    )
-    lookalike = FakeEntry(
-        "normal-thread",
-        datetime.now(UTC),
-        FakeSource(
-            SimpleNamespace(value="telegram"),
-            "chat-1",
-            "agency-heartbeat-not-a-run-id",
-        ),
-        "agent:main:telegram:dm:chat-1:normal",
-    )
-
-    class Database:
-        def __init__(self):
-            self.rows = [
-                {"id": main.session_id, "thread_id": None},
-                {"id": stale.session_id, "thread_id": stale.origin.thread_id},
-                {
-                    "id": "stale-orphan",
-                    "thread_id": "agency-heartbeat-" + "b" * 32,
-                },
-                {"id": lookalike.session_id, "thread_id": lookalike.origin.thread_id},
-            ]
-
-        def search_sessions(self, limit=20, offset=0):
-            return self.rows[offset : offset + limit]
-
-        def delete_session(self, session_id, sessions_dir=None):
-            before = len(self.rows)
-            self.rows = [row for row in self.rows if row["id"] != session_id]
-            return len(self.rows) != before
-
-    class Store:
-        def __init__(self):
-            self._lock = threading.RLock()
-            self._entries = {item.session_key: item for item in (main, stale, lookalike)}
-            self._db = Database()
-            self.saved = 0
-
-        def _ensure_loaded(self):
-            pass
-
-        def _save(self):
-            self.saved += 1
-
-    gateway = SimpleNamespace(
-        session_store=Store(),
-        _running_agents={},
-        _running_agents_ts={},
-        _session_model_overrides={},
-        _pending_messages={},
-    )
-
-    result = asyncio.run(runner._cleanup_stale_work_sessions(gateway))
-
-    assert result == {"removed": 2, "errors": 0}
-    assert set(gateway.session_store._entries) == {
-        main.session_key,
-        lookalike.session_key,
-    }
-    assert {row["id"] for row in gateway.session_store._db.rows} == {
-        main.session_id,
-        lookalike.session_id,
-    }
-
-
-def test_due_tasks_advance_only_after_completed_model_turn(tmp_path, monkeypatch, config_factory):
+def test_due_tasks_advance_only_after_committed_turn(tmp_path, monkeypatch, config_factory):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     _install_fake_gateway_module(monkeypatch)
     (tmp_path / "HEARTBEAT.md").write_text(
@@ -1285,163 +1129,36 @@ def test_due_tasks_advance_only_after_completed_model_turn(tmp_path, monkeypatch
         encoding="utf-8",
     )
     config = config_factory(database_path=str(tmp_path / "runner.db"), heartbeat_target="none")
-    runtime = SimpleNamespace(store=AgencyStore(config))
-    runner = HeartbeatRunner(runtime)
+    runner = HeartbeatRunner(SimpleNamespace(store=AgencyStore(config)))
     state = {"recent_starts": [], "task_last_runs": {}, "commitment_last_runs": {}}
-    entry = FakeEntry(
-        "telegram-main",
-        datetime(2026, 7, 15, tzinfo=UTC),
-        FakeSource(SimpleNamespace(value="telegram"), "chat-1"),
-    )
-
-    assert asyncio.run(runner.run_once(FakeGateway([entry]), config, state, reason="task")) is True
-    assert state["task_last_runs"]["observe"] > 0
-    gateway = FakeGateway([entry])
-    state["task_last_runs"]["observe"] = 0
-    assert asyncio.run(runner.run_once(gateway, config, state, reason="task")) is True
-    assert "Due heartbeat tasks:\n- observe: Observe." in gateway.prompts[0]
-
-
-def test_run_once_uses_and_deletes_disposable_transcript_fork(
-    tmp_path, monkeypatch, config_factory
-):
-    monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    _install_fake_gateway_module(monkeypatch)
-    config = config_factory(database_path=str(tmp_path / "runner.db"), heartbeat_target="last")
-    runtime = SimpleNamespace(store=AgencyStore(config))
-    runner = HeartbeatRunner(runtime)
-    original_time = datetime(2026, 7, 15, tzinfo=UTC)
     source = FakeSource(SimpleNamespace(value="telegram"), "chat-1")
-    main = FakeEntry("telegram-main", original_time, source)
-    main.session_key = "agent:main:telegram:dm:chat-1"
-
-    class Database:
-        def __init__(self):
-            self.deleted = []
-
-        def delete_session(self, session_id, sessions_dir=None):
-            self.deleted.append((session_id, sessions_dir))
-            return True
-
-    class Store:
-        def __init__(self):
-            self._lock = threading.RLock()
-            self._entries = {main.session_key: main}
-            self._db = Database()
-            self.transcripts = {main.session_id: [{"role": "user", "content": "the genuine chat"}]}
-            self.saved = 0
-
-        def list_sessions(self):
-            return list(self._entries.values())
-
-        def get_or_create_session(self, work_source):
-            entry = FakeEntry("heartbeat-temp", datetime.now(UTC), work_source)
-            entry.session_key = f"agent:main:telegram:dm:chat-1:{work_source.thread_id}"
-            self._entries[entry.session_key] = entry
-            self.transcripts[entry.session_id] = []
-            return entry
-
-        def load_transcript(self, session_id):
-            return [dict(item) for item in self.transcripts[session_id]]
-
-        def rewrite_transcript(self, session_id, messages):
-            raise AssertionError("fresh heartbeat sessions must not clone the main transcript")
-
-        def _save(self):
-            self.saved += 1
-
-    store = Store()
-
-    class Gateway(FakeGateway):
-        def __init__(self):
-            super().__init__([main])
-            self.session_store = store
-            self._running_agents = {}
-            self._running_agents_ts = {}
-            self._session_model_overrides = {}
-            self._pending_messages = {}
-            self.evicted = []
-
-        def _session_key_for_source(self, candidate):
-            suffix = f":{candidate.thread_id}" if candidate.thread_id else ""
-            return f"agent:main:telegram:dm:{candidate.chat_id}{suffix}"
-
-        def _release_running_agent_state(self, session_key):
-            self._running_agents.pop(session_key, None)
-
-        def _evict_cached_agent(self, session_key):
-            self.evicted.append(session_key)
-
-        async def _handle_message(self, event):
-            self.events.append(event)
-            assert event.source.thread_id.startswith("agency-heartbeat-")
-            temp = next(
-                item
-                for item in store._entries.values()
-                if getattr(item.origin, "thread_id", None) == event.source.thread_id
-            )
-            assert store.transcripts[temp.session_id] == []
-            assert store.transcripts[main.session_id] == [
-                {"role": "user", "content": "the genuine chat"}
-            ]
-            store.transcripts[temp.session_id].append({"role": "user", "content": event.text})
-            return "isolated output"
-
-    gateway = Gateway()
-    state = {"recent_starts": [], "task_last_runs": {}, "commitment_last_runs": {}}
-    assert asyncio.run(runner.run_once(gateway, config, state, reason="isolation")) is True
-    assert store.transcripts[main.session_id] == [{"role": "user", "content": "the genuine chat"}]
-    assert list(store._entries) == [main.session_key]
-    assert store._db.deleted[0][0] == "heartbeat-temp"
-    assert gateway.adapter.sent == [("chat-1", "isolated output", None)]
-    assert main.updated_at == original_time
-    assert _active_heartbeats == {}
+    entry = FakeEntry("telegram-main", datetime.now(UTC), source)
+    assert asyncio.run(runner.run_once(FakeGateway([entry]), config, state, reason="task"))
+    assert "observe" in state["task_last_runs"]
 
 
-def test_only_authorized_matching_user_can_preempt_heartbeat():
+def test_only_authorized_matching_user_can_queue_behind_heartbeat():
     source = FakeSource(SimpleNamespace(value="telegram"), "chat-1")
     turn = HeartbeatTurn(
         "run",
         "prompt",
         target_route_key="agent:main:telegram:dm:chat-1",
-        work_session_key="agent:main:telegram:dm:chat-1:agency-heartbeat-run",
+        session_key="agent:main:telegram:dm:chat-1",
     )
-
-    class Agent:
-        def __init__(self):
-            self.reasons = []
-
-        def interrupt(self, reason):
-            self.reasons.append(reason)
-
-    agent = Agent()
-
-    class Gateway:
-        authorized = False
-        _running_agents = {turn.work_session_key: agent}
-
-        def _is_user_authorized(self, candidate):
-            return self.authorized
-
-        def _session_key_for_source(self, candidate):
-            return "agent:main:telegram:dm:chat-1"
-
-    gateway = Gateway()
-    event = SimpleNamespace(internal=False, source=source)
+    gateway = SimpleNamespace(
+        _is_user_authorized=lambda candidate: candidate is source,
+        _session_key_for_source=lambda candidate: "agent:main:telegram:dm:chat-1",
+        _running_agents={},
+    )
     _register_active_heartbeat(turn, source, turn.target_route_key)
     try:
-        assert release_heartbeat_for_user_turn(event, gateway=gateway) is None
+        unauthorized = SimpleNamespace(internal=False, source=FakeSource(source.platform, "chat-1"))
+        assert release_heartbeat_for_user_turn(unauthorized, gateway=gateway) is None
         assert turn.interrupted_by_user is False
-        gateway.authorized = True
-        assert release_heartbeat_for_user_turn(event, gateway=gateway) is turn
+
+        real_event = SimpleNamespace(internal=False, source=source)
+        assert release_heartbeat_for_user_turn(real_event, gateway=gateway) is turn
         assert turn.interrupted_by_user is True
-        assert agent.reasons == ["native heartbeat yielded to a real user message"]
-
-        turn.interrupted_by_user = False
-        turn.delivery_started = True
-        assert release_heartbeat_for_user_turn(event, gateway=gateway) is None
-        assert turn.interrupted_by_user is False
+        assert turn.deferred_user_events == [real_event]
     finally:
-        from agency.heartbeat import _unregister_active_heartbeat
-
-        _unregister_active_heartbeat(turn)
+        _active_heartbeats.clear()

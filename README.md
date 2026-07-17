@@ -5,13 +5,15 @@ Persistent workspace, intentions, reflection, and a gateway-native heartbeat for
 
 The plugin gives the configured Hermes model a small inspectable state beyond recalled facts. It
 can retain a focus, intentions, unresolved questions, observations, reflections, and decisions.
-Its heartbeat can target the latest real Hermes conversation, open one isolated internal work
-session, decide whether anything merits attention, remain silent, or deliver one final message.
+Its heartbeat can target the latest real Hermes conversation, take an assistant-initiated turn in
+that conversation, decide whether anything merits attention, remain silent, or deliver one final
+message.
 
-Version 1.1 replaces shared-session execution with a fresh disposable Hermes session for every
-heartbeat. The durable chat transcript and genuine-user activity clock are untouched. Durable
-wake claims, a cross-process runner lease, startup cleanup, and an at-most-once delivery ledger
-make process restarts explicit instead of silently repeating uncertain messages.
+Version 1.2 makes the heartbeat part of the actual chat continuity. The model loads the real
+session history; a delivered heartbeat is committed as a timestamped system provenance marker and
+an assistant message. The synthetic API trigger is never stored as a user message. Authorized user
+traffic is ordered behind the commit boundary or interrupts unfinished model work, so transcript
+writes and Telegram delivery cannot race.
 
 > This is software state and model behavior, not evidence that a model is conscious, sentient, or
 > emotional. Educational Lab controls can remove that prompt contract for controlled research;
@@ -30,35 +32,36 @@ flowchart LR
     F["HEARTBEAT.md"] --> P
     I["Due intentions"] --> P
     P -->|"empty / not due / busy"| X["Skip without model call"]
-    P -->|"ready"| H["Fresh disposable no-delivery session"]
+    P -->|"ready"| H["Assistant-initiated turn in real session"]
     H --> M["Configured Hermes model"]
     M --> R["heartbeat_respond"]
     R -->|"notify=false"| Q["Audited silence"]
-    R -->|"notify=true"| B["Buffered final delivery"]
-    H -->|"hard close + delete"| D["No disposable transcript or Memory session"]
+    R -->|"notify=true"| B["Atomic transcript commit + one delivery"]
+    B --> D["Memory captures assistant-origin episode"]
+    U -. "arrives during heartbeat" .-> O["Interrupt or ordered queue"]
+    O --> G
 ```
 
 The scheduler is not a renamed cron. It is attached to the active `GatewayRunner` after startup
-restore and uses Hermes' existing message pipeline. A routing-distinct session sees only
-`[Hermes heartbeat poll]`; effective instructions and Agency state are injected ephemerally. It
-does not clone the user's transcript. The work source uses Hermes' local/CLI tool profile, which
-has no messaging adapter; this prevents streaming, interim tool output, reasoning display, or a
-final answer from leaking to a synthetic Telegram topic. Agency alone commits either one final
-message to the original peer or audited silence. Model reasoning itself stays enabled unless
-`heartbeat_disable_thinking: true` is explicitly configured.
+restore and uses Hermes' existing message pipeline and the selected conversation's real session
+ID. The internal trigger is API-only. Agency suppresses Hermes persistence for that trigger, then
+commits only the selected assistant output with explicit assistant-initiated provenance. Streaming,
+tool progress, interim messages, and reasoning display stay buffered; Agency owns the sole final
+adapter send. Model reasoning itself stays enabled unless `heartbeat_disable_thinking: true` is
+explicitly configured.
 
 The integration currently uses a guarded compatibility patch around Hermes' gateway startup
 lifecycle because the public plugin API has no gateway-ready service hook. It is tested against
-Hermes Agent 0.18.2 at upstream commit
-`10b6d1a910411f293c9c2422da3b6df6ec66becc`. If a future Hermes release changes `GatewayRunner`, the normal inbound hook is
+Hermes Agent 0.18.2 at qualified commit
+`e95d00f9107de79eb65b65d2c5bf6852a399c704`. If a future Hermes release changes `GatewayRunner`, the normal inbound hook is
 a fallback attachment point and the Control Center audit reports missing native integration.
 
 ## Compatibility
 
 | Component | Release gate |
 | --- | --- |
-| Hermes Agent | `0.18.2`, upstream `10b6d1a910411f293c9c2422da3b6df6ec66becc` |
-| Consolidating Local Memory | `3.5.0` for exact disposable-session isolation |
+| Hermes Agent | `0.18.2`, qualified `e95d00f9107de79eb65b65d2c5bf6852a399c704` |
+| Consolidating Local Memory | `3.6.0` for assistant-origin heartbeat capture |
 | Python | `3.11`–`3.13` |
 | Storage | SQLite or SQLCipher |
 | OpenClaw reference | audited `349f78776d0bb875463f4858f5826744d93f1240` |
@@ -98,6 +101,8 @@ audit uses OpenClaw commit `349f78776d0bb875463f4858f5826744d93f1240`.
 - A busy gateway defers the heartbeat instead of interrupting an active user, cron, API, or agent
   turn.
 - Manual wakes bypass interval cooldown but still wait for the gateway to become available.
+- A completed manual/event wake consumes an imminent phase edge, preventing two proactive turns
+  from landing only seconds apart while preserving the deterministic long-term cadence.
 - Event wakes use the next-due and minimum-spacing gates.
 - A rolling flood guard prevents tool or event feedback loops.
 - Scheduler state, task last-run times, and pending/claimed wakes survive gateway restarts.
@@ -148,12 +153,13 @@ skips the call.
   `suppressed`, `interrupted`, or `failed`. A crash after send begins is marked ambiguous and is
   not automatically resent.
 
-Heartbeat turns do not reuse or modify the real transcript. The target session ID is used for
-Agency state, routing, and the final adapter send; optional longitudinal continuity comes only from
-the bounded same-model subjective journal. The disposable session is hard-closed and deleted after
-the model turn. If a genuine authorized platform message arrives before the send commit point, the
-user turn takes priority: the heartbeat is interrupted, its delivery path is discarded, and the
-real turn proceeds on its normal session.
+Heartbeat turns load and continue the real transcript. A visible result appends exactly two rows:
+a timestamped system note stating that no user message triggered the turn, followed by the exact
+assistant text sent to the peer. Silent and `target: none` runs append nothing. If an authorized
+platform message arrives before the commit point, unfinished heartbeat work is interrupted and the
+real event is replayed normally. If it arrives during commit/delivery, it waits until the atomic
+conversation boundary completes. The genuine-user activity clock remains semantically distinct
+from assistant activity.
 
 ## Install
 
@@ -333,12 +339,11 @@ Operator CLI, slash commands, and Control Center remain the authority surfaces.
 
 ## Memory-plugin interaction
 
-The native heartbeat uses Hermes' adapter-free local route with an exact
-`agency-heartbeat-<32 hex>` thread marker before it enters the gateway. Consolidating Local Memory
-3.5 recognizes only that exact form: explicit reads remain
-available, but it creates no Memory session or worker and excludes the poll/response from prefetch,
-compression, mirroring, episodes, summaries, and extraction. Agency then hard-closes the cached
-agent and deletes the disposable Hermes routing row and transcript.
+Consolidating Local Memory 3.6 recognizes the hidden heartbeat trigger as assistant-originated. It
+uses the same Memory session as the real Hermes conversation, drops the synthetic user text, and
+captures the transformed assistant result as an episode with `turn_origin: assistant`. This allows
+later recall of what Hermes independently expressed without inventing a user statement or replacing
+the current-request working-memory slot. Visible transcript and Memory provenance therefore agree.
 
 ## Test and verify
 
@@ -351,10 +356,10 @@ python3 -m pytest -q
 
 The suite covers configuration and legacy migration, deterministic scheduling, active hours,
 task parsing, wake coalescing, cooldown/flood behavior, acknowledgement stripping, target-session
-routing, disposable session cleanup, hard agent-resource shutdown, stale-session reconciliation,
-claimed-wake recovery, the process lease, at-most-once delivery states, structured fail-closed
-output, provider request isolation, interrupted-run recovery, encrypted-store behavior, real-user
-interruption handoff, and unrelated-cron isolation.
+routing, hidden-trigger persistence suppression, exact real-session commit, cached-agent
+reconciliation, claimed-wake recovery, the process lease, at-most-once delivery states, structured
+fail-closed output, provider request isolation, interrupted-run recovery, encrypted-store behavior,
+ordered real-user handoff, and unrelated-cron isolation.
 
 The release gate also runs the lifecycle tests against a current Hermes checkout:
 

@@ -14,9 +14,9 @@ PRIVATE_MARKERS = (
 def test_public_tree_contains_no_personal_markers() -> None:
     findings: list[str] = []
     for path in ROOT.rglob("*"):
-        if not path.is_file() or path.suffix.lower() not in PUBLIC_TEXT_SUFFIXES:
-            continue
         if any(part in {".git", ".venv", "__pycache__"} for part in path.parts):
+            continue
+        if not path.is_file() or path.suffix.lower() not in PUBLIC_TEXT_SUFFIXES:
             continue
         text = path.read_text(encoding="utf-8").lower()
         findings.extend(

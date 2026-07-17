@@ -40,7 +40,8 @@ from .store import AgencyStore
 logger = logging.getLogger(__name__)
 
 HEARTBEAT_OK = "HEARTBEAT_OK"
-HEARTBEAT_TRANSCRIPT_PROMPT = "[Hermes heartbeat poll]"
+HEARTBEAT_TRANSCRIPT_PROMPT = "[Hermes assistant-initiated heartbeat; no user message was sent.]"
+HEARTBEAT_TRANSCRIPT_NOTE = "Assistant-initiated heartbeat. No user message triggered this turn."
 HEARTBEAT_PROMPT = (
     "Read HEARTBEAT.md if it exists in the Hermes home. Follow it strictly. "
     "Do not infer or repeat old tasks from prior chats. Use heartbeat_respond with notify=false "
@@ -54,7 +55,6 @@ _STATE_KEY = "heartbeat_state"
 _MAX_ACTIVE_SEEK = timedelta(days=7)
 _WAKE_THREAD_LOCK = threading.Lock()
 _WAKE_PRIORITY = {"scheduled": 0, "event": 1, "immediate": 2, "manual": 3}
-_WORK_THREAD_RE = re.compile(r"^agency-heartbeat-[0-9a-f]{32}$")
 
 WakeIntent = Literal["scheduled", "event", "immediate", "manual"]
 
@@ -100,13 +100,22 @@ class HeartbeatTurn:
     target_session_id: str = ""
     target_source_key: tuple[str, ...] | None = None
     target_route_key: str = ""
-    work_session_id: str = ""
-    work_session_key: str = ""
+    session_key: str = ""
     response: dict[str, Any] | None = None
     raw_output: str = ""
+    visible_output: str = ""
     transformed: bool = False
     interrupted_by_user: bool = False
     delivery_started: bool = False
+    transcript_committed: bool = False
+    delivery_status: str = "pending"
+    delivery_error: str = ""
+    accepting_user_events: bool = True
+    deferred_user_events: list[Any] = dataclasses.field(default_factory=list, repr=False)
+    baseline_transcript: list[dict[str, Any]] = dataclasses.field(default_factory=list, repr=False)
+    baseline_captured: bool = False
+    delivery_enabled: bool = True
+    state: dict[str, Any] | None = dataclasses.field(default=None, repr=False)
     decision_id: str = ""
     decision_finalized: bool = False
     response_lock: threading.Lock = dataclasses.field(default_factory=threading.Lock, repr=False)
@@ -161,8 +170,9 @@ def release_heartbeat_for_user_turn(event: Any, gateway: Any = None) -> Heartbea
 
     Hermes invokes ``pre_gateway_dispatch`` before its own authorization gate.  Re-checking
     authorization here prevents an unknown sender from cancelling a legitimate heartbeat.
-    The heartbeat runs on a disposable routing key, so the real user turn can then continue
-    normally on the durable chat lane instead of being recursively consumed by the heartbeat.
+    The real event is retained and replayed through Hermes after the heartbeat releases the
+    durable chat lane. This prevents the busy-session interrupt recursion from executing a real
+    user turn inside the heartbeat's ContextVar scope or losing it during final delivery.
     """
 
     if event is None or bool(getattr(event, "internal", False)):
@@ -206,19 +216,20 @@ def release_heartbeat_for_user_turn(event: Any, gateway: Any = None) -> Heartbea
     if turn is None:
         return None
     with turn.response_lock:
-        # Once the adapter send has begun, delivery has won the race and can
-        # no longer be recalled reliably.  Before that exact commit point, a
-        # genuine inbound turn always wins and suppresses the heartbeat.
-        if turn.delivery_started:
+        if not turn.accepting_user_events:
             return None
-        turn.interrupted_by_user = True
-    if gateway is not None and turn.work_session_key:
-        running = getattr(gateway, "_running_agents", {}).get(turn.work_session_key)
+        turn.deferred_user_events.append(event)
+        # Once transcript commit/delivery begins it is no longer safe to recall
+        # the message. The genuine turn still queues and will run immediately
+        # after the ordered delivery boundary.
+        should_interrupt = not turn.delivery_started
+        if should_interrupt:
+            turn.interrupted_by_user = True
+    if gateway is not None and should_interrupt and turn.session_key:
+        running = getattr(gateway, "_running_agents", {}).get(turn.session_key)
         if running is not None and hasattr(running, "interrupt"):
             with contextlib.suppress(Exception):
                 running.interrupt("native heartbeat yielded to a real user message")
-    if current is turn:
-        _heartbeat_turn.set(None)
     return turn
 
 
@@ -836,9 +847,8 @@ def heartbeat_status(store: AgencyStore | None = None) -> dict[str, Any]:
         "runs": _nonnegative_int(state.get("runs")),
         "attempts": _nonnegative_int(state.get("attempts")),
         "consecutive_failures": _nonnegative_int(state.get("consecutive_failures")),
-        "run_in_progress": bool(inflight) or (
-            state.get("last_status") == "running" and last_started > last_completed
-        ),
+        "run_in_progress": bool(inflight)
+        or (state.get("last_status") == "running" and last_started > last_completed),
         "pending_wake": {
             "present": bool(pending),
             "intent": str(pending.get("intent") or "") if pending else "",
@@ -1187,6 +1197,22 @@ class HeartbeatRunner:
         phase = heartbeat_phase_seconds(_scheduler_seed(), "conscious-agency", interval)
         return seek_active_due(next_phase_due(now, interval, phase), interval, config)
 
+    def _next_scheduled_after_wake(self, completed_at: float, config: AgencyConfig) -> float:
+        """Let a completed external wake satisfy an imminently due phase.
+
+        Manual, event, and immediate wakes are real heartbeat opportunities.
+        Without this coalescing, a wake just before the deterministic phase can
+        produce a second proactive message seconds later and look like a loop.
+        Keep the phase stable, but skip one edge when it is less than half an
+        interval away.
+        """
+
+        interval = _parse_duration(config.heartbeat_every)
+        candidate = self._next_scheduled(completed_at, config)
+        if candidate - completed_at < interval / 2:
+            return self._next_scheduled(candidate + 0.001, config)
+        return candidate
+
     @staticmethod
     def _gateway_busy(gateway: Any) -> bool:
         if getattr(gateway, "_draining", False) or getattr(
@@ -1305,13 +1331,6 @@ class HeartbeatRunner:
     async def run(self, gateway: Any) -> None:
         logger.info("Conscious Agency native heartbeat runner started")
         try:
-            cleanup = await self._cleanup_stale_work_sessions(gateway)
-            if cleanup["removed"] or cleanup["errors"]:
-                self.runtime.store.add_event(
-                    "heartbeat_stale_sessions_cleaned",
-                    summary="Stale heartbeat work sessions were reconciled",
-                    metadata=cleanup,
-                )
             self._reconcile_interrupted_run()
         except Exception:
             # Startup reconciliation is retried naturally by the durable state
@@ -1447,6 +1466,14 @@ class HeartbeatRunner:
                 if executed:
                     state["runs"] = _nonnegative_int(state.get("runs")) + 1
                     state["consecutive_failures"] = 0
+                    delivery_status = str((state.get("delivery") or {}).get("status") or "")
+                    if intent != "scheduled" and delivery_status in {
+                        "delivered",
+                        "silent",
+                        "suppressed",
+                        "ambiguous",
+                    }:
+                        state["next_due_at"] = self._next_scheduled_after_wake(completed, config)
                 elif state.get("last_status") == "failed":
                     state["consecutive_failures"] = (
                         _nonnegative_int(state.get("consecutive_failures")) + 1
@@ -1586,261 +1613,236 @@ class HeartbeatRunner:
         return None
 
     @staticmethod
-    def _work_source(source: Any, run_id: str) -> Any:
-        """Create an isolated, non-delivery route for the model turn.
-
-        The real peer is retained separately for the one explicit post-turn
-        delivery.  Running the disposable turn on the peer's messaging
-        platform would let Hermes stream progress/final text to the synthetic
-        heartbeat thread id before Agency can make its speak/silent decision.
-        Hermes maps ``Platform.LOCAL`` to its normal CLI tool configuration but
-        has no gateway adapter for it, so the model keeps full tool access and
-        the synthetic turn cannot leak or duplicate a platform message.
-        """
-
-        try:
-            original_platform = getattr(source, "platform", None)
-            try:
-                local_platform = type(original_platform)("local")
-            except (TypeError, ValueError):
-                # Lightweight test doubles do not necessarily implement the
-                # Hermes Platform enum. Their fake gateways have no streaming
-                # adapter, so retaining the fake platform is safe.
-                local_platform = original_platform
-            marker = f"agency-heartbeat-{run_id}"
-            changes = {
-                "platform": local_platform,
-                "chat_id": marker,
-                "thread_id": marker,
-            }
-            if hasattr(source, "chat_name"):
-                changes["chat_name"] = "Agency heartbeat"
-            if hasattr(source, "chat_type"):
-                changes["chat_type"] = "dm"
-            return dataclasses.replace(source, **changes)
-        except (TypeError, ValueError):
-            return source
-
-    async def _prepare_work_session(
-        self, gateway: Any, entry: Any, source: Any, run_id: str
-    ) -> tuple[Any, Any]:
-        """Create a fresh disposable session without cloning conversation history."""
+    async def _raw_transcript(gateway: Any, session_id: str) -> list[dict[str, Any]]:
+        """Read the canonical transcript without alternation repair."""
 
         store = getattr(gateway, "session_store", None)
-        create = getattr(store, "get_or_create_session", None)
-        if not callable(create):
-            raise RuntimeError("Hermes does not expose disposable heartbeat sessions")
-        work_source = self._work_source(source, run_id)
-        if work_source is source:
-            raise RuntimeError("Hermes source routing cannot isolate a heartbeat session")
-        work_entry = create(work_source)
-        work_session_id = str(getattr(work_entry, "session_id", "") or "")
-        work_session_key = str(getattr(work_entry, "session_key", "") or "")
-        main_session_id = str(getattr(entry, "session_id", "") or "")
-        main_session_key = str(getattr(entry, "session_key", "") or "")
-        if not work_session_id:
-            await self._cleanup_work_session(gateway, work_entry)
-            raise RuntimeError("Hermes created an invalid disposable heartbeat session")
-        if work_session_id == main_session_id or (
-            work_session_key and work_session_key == main_session_key
+        database = getattr(store, "_db", None)
+        raw_load = getattr(database, "get_messages_as_conversation", None)
+        if callable(raw_load):
+            result = raw_load(session_id, repair_alternation=False)
+            if inspect.isawaitable(result):
+                result = await result
+            return [dict(item) for item in (result or []) if isinstance(item, dict)]
+        load = getattr(store, "load_transcript", None)
+        if not callable(load):
+            raise RuntimeError("Hermes transcript loading is unavailable")
+        result = load(session_id)
+        if inspect.isawaitable(result):
+            result = await result
+        return [dict(item) for item in (result or []) if isinstance(item, dict)]
+
+    @staticmethod
+    async def _rewrite_transcript(
+        gateway: Any, session_id: str, messages: list[dict[str, Any]]
+    ) -> None:
+        store = getattr(gateway, "session_store", None)
+        rewrite = getattr(store, "rewrite_transcript", None)
+        if not callable(rewrite):
+            raise RuntimeError("Hermes transcript rewrite is unavailable")
+        result = rewrite(session_id, messages)
+        if inspect.isawaitable(result):
+            result = await result
+        if result is False:
+            raise RuntimeError("Hermes refused transcript reconciliation")
+
+    async def _restore_heartbeat_baseline(self, gateway: Any, turn: HeartbeatTurn) -> None:
+        if not turn.baseline_captured:
+            return
+        current = await self._raw_transcript(gateway, turn.target_session_id)
+        if current == turn.baseline_transcript:
+            return
+        await self._rewrite_transcript(
+            gateway,
+            turn.target_session_id,
+            [dict(item) for item in turn.baseline_transcript],
+        )
+        restored = await self._raw_transcript(gateway, turn.target_session_id)
+        if restored != turn.baseline_transcript:
+            raise RuntimeError("Heartbeat trigger leaked into the durable transcript")
+
+    @staticmethod
+    def _sanitize_cached_heartbeat_messages(
+        gateway: Any,
+        turn: HeartbeatTurn,
+        *,
+        note: dict[str, Any] | None = None,
+        assistant: dict[str, Any] | None = None,
+    ) -> None:
+        agent = getattr(gateway, "_running_agents", {}).get(turn.session_key)
+        messages = getattr(agent, "_session_messages", None)
+        if not isinstance(messages, list):
+            return
+        marker_index = next(
+            (
+                index
+                for index in range(len(messages) - 1, -1, -1)
+                if isinstance(messages[index], dict)
+                and messages[index].get("role") == "user"
+                and messages[index].get("content") == HEARTBEAT_TRANSCRIPT_PROMPT
+            ),
+            None,
+        )
+        if marker_index is not None:
+            del messages[marker_index:]
+        if note is not None:
+            messages.append({**note, "_db_persisted": True})
+        if assistant is not None:
+            messages.append({**assistant, "_db_persisted": True})
+        for name, value in (
+            ("_persist_user_message_idx", None),
+            ("_persist_user_message_override", None),
+            ("_persist_user_message_timestamp", None),
         ):
-            # Never call the cleanup path for an entry that may be the durable
-            # main session. A routing collision must fail without touching it.
-            raise RuntimeError("Hermes routed the heartbeat onto the main session")
-        return work_source, work_entry
+            with contextlib.suppress(Exception):
+                setattr(agent, name, value)
 
-    async def _cleanup_work_session(self, gateway: Any, entry: Any) -> None:
-        """Remove every durable and in-memory trace of a disposable heartbeat fork."""
+    async def _commit_conversation_output(
+        self,
+        gateway: Any,
+        source: Any,
+        turn: HeartbeatTurn,
+        response: str,
+    ) -> None:
+        """Commit and deliver one assistant-initiated turn under Hermes' session lease."""
 
-        session_key = str(getattr(entry, "session_key", "") or "")
-        session_id = str(getattr(entry, "session_id", "") or "")
-        if session_key:
-            release = getattr(gateway, "_release_running_agent_state", None)
-            if callable(release):
-                with contextlib.suppress(Exception):
-                    release(session_key)
-            # A normal Hermes cache eviction is intentionally soft and does
-            # not shut down the MemoryProvider. Disposable heartbeat agents
-            # are true one-shot sessions, so close their provider and tool
-            # resources before evicting the cache entry. Otherwise every
-            # heartbeat can leave an open memory session and worker behind.
-            cached_agent: Any | None = None
-            cache = getattr(gateway, "_agent_cache", None)
-            cache_lock = getattr(gateway, "_agent_cache_lock", None)
-            if isinstance(cache, dict):
-                manager = (
-                    cache_lock
-                    if hasattr(cache_lock, "__enter__")
-                    else contextlib.nullcontext()
-                )
-                with manager:
-                    cached = cache.get(session_key)
-                cached_agent = cached[0] if isinstance(cached, tuple) and cached else cached
-            if cached_agent is not None and (
-                hasattr(cached_agent, "shutdown_memory_provider")
-                or hasattr(cached_agent, "close")
-            ):
-                cleanup_off_loop = getattr(gateway, "_cleanup_agent_resources_off_loop", None)
-                cleanup_sync = getattr(gateway, "_cleanup_agent_resources", None)
-                if callable(cleanup_off_loop):
-                    result = cleanup_off_loop(
-                        cached_agent,
-                        context="agency heartbeat disposable session",
-                    )
-                    if inspect.isawaitable(result):
-                        await result
-                elif callable(cleanup_sync):
-                    await asyncio.wait_for(
-                        asyncio.to_thread(cleanup_sync, cached_agent),
-                        timeout=30.0,
-                    )
-                else:
-                    raise RuntimeError(
-                        "Hermes cannot hard-clean a disposable heartbeat agent"
-                    )
-            evict = getattr(gateway, "_evict_cached_agent", None)
-            if callable(evict):
-                with contextlib.suppress(Exception):
-                    evict(session_key)
-            for name in (
-                "_session_model_overrides",
-                "_pending_messages",
-                "_running_agents",
-                "_running_agents_ts",
-            ):
-                mapping = getattr(gateway, name, None)
-                if isinstance(mapping, dict):
-                    mapping.pop(session_key, None)
-        store = getattr(gateway, "session_store", None)
-        if store is None:
-            raise RuntimeError("Hermes session store disappeared during heartbeat cleanup")
-        lock = getattr(store, "_lock", None)
-        entries = getattr(store, "_entries", None)
-        save = getattr(store, "_save", None)
-        errors: list[str] = []
-        if isinstance(entries, dict):
-            manager = lock if hasattr(lock, "__enter__") else contextlib.nullcontext()
-            try:
-                with manager:
-                    entries.pop(session_key, None)
-                    if not callable(save):
-                        raise RuntimeError("Hermes session routing cannot be persisted")
-                    saved = save()
-                    if inspect.isawaitable(saved):
-                        await saved
-            except Exception as exc:
-                errors.append(f"routing cleanup failed: {exc}")
-        else:
-            errors.append("Hermes session routing index is unavailable")
-        database = getattr(store, "_db", None)
-        delete = getattr(database, "delete_session", None)
-        if not session_id or not callable(delete):
-            errors.append("Hermes session database deletion is unavailable")
-        else:
-            try:
-                deleted = delete(session_id, sessions_dir=hermes_home() / "sessions")
-                if inspect.isawaitable(deleted):
-                    deleted = await deleted
-                if deleted is False:
-                    raise RuntimeError("session database refused deletion")
-            except Exception as exc:
-                errors.append(f"transcript cleanup failed: {exc}")
-        if errors:
-            raise RuntimeError("; ".join(errors))
+        clean = str(response or "").strip()
+        turn.visible_output = clean
+        silent = not clean or clean.casefold() in {"[silent]", HEARTBEAT_OK.casefold()}
+        with turn.response_lock:
+            if turn.interrupted_by_user:
+                turn.delivery_status = "interrupted"
+                return
+            if silent:
+                turn.delivery_status = "silent"
+                return
+            if not turn.delivery_enabled:
+                turn.delivery_status = "suppressed"
+                return
+            # From this point a real inbound event queues behind the ordered
+            # transcript+adapter commit instead of attempting to recall it.
+            turn.delivery_started = True
 
-    async def _cleanup_stale_work_sessions(self, gateway: Any) -> dict[str, int]:
-        """Remove marker-exact disposable transcripts left by old crashes or loops."""
-
-        result = {"removed": 0, "errors": 0}
-        store = getattr(gateway, "session_store", None)
-        if store is None:
-            return result
-        ensure_loaded = getattr(store, "_ensure_loaded", None)
-        if callable(ensure_loaded):
-            try:
-                loaded = ensure_loaded()
-                if inspect.isawaitable(loaded):
-                    await loaded
-            except Exception:
-                logger.warning(
-                    "Could not load Hermes routing before heartbeat cleanup",
-                    exc_info=True,
-                )
-                result["errors"] += 1
-
-        entries = getattr(store, "_entries", None)
-        routed: list[Any] = []
-        if isinstance(entries, dict):
-            routed = [
-                entry
-                for entry in list(entries.values())
-                if _WORK_THREAD_RE.fullmatch(
-                    str(getattr(getattr(entry, "origin", None), "thread_id", "") or "")
-                )
-            ]
-        removed_ids: set[str] = set()
-        for entry in routed:
-            session_id = str(getattr(entry, "session_id", "") or "")
-            try:
-                await self._cleanup_work_session(gateway, entry)
-                if session_id:
-                    removed_ids.add(session_id)
-                result["removed"] += 1
-            except Exception:
-                logger.warning(
-                    "Could not remove a stale routed heartbeat session",
-                    exc_info=True,
-                )
-                result["errors"] += 1
-
-        database = getattr(store, "_db", None)
-        search = getattr(database, "search_sessions", None)
-        delete = getattr(database, "delete_session", None)
-        if not callable(search) or not callable(delete):
-            return result
-        candidates: list[str] = []
-        offset = 0
         try:
-            while offset < 100_000:
-                page = search(limit=500, offset=offset)
-                if inspect.isawaitable(page):
-                    page = await page
-                if not isinstance(page, list) or not page:
-                    break
-                for row in page:
-                    if not isinstance(row, dict):
-                        continue
-                    if not _WORK_THREAD_RE.fullmatch(str(row.get("thread_id") or "")):
-                        continue
-                    session_id = str(row.get("id") or "")
-                    if session_id and session_id not in removed_ids:
-                        candidates.append(session_id)
-                offset += len(page)
-                if len(page) < 500:
-                    break
-        except Exception:
-            logger.warning(
-                "Could not scan Hermes sessions for stale heartbeat work",
-                exc_info=True,
-            )
-            result["errors"] += 1
-            return result
+            await self._restore_heartbeat_baseline(gateway, turn)
+            observed_at = time.time()
+            local_time = datetime.fromtimestamp(
+                observed_at, ZoneInfo(load_config().timezone)
+            ).isoformat()
+            note = {
+                "role": "system",
+                "content": f"{HEARTBEAT_TRANSCRIPT_NOTE} Recorded at {local_time}.",
+                "timestamp": observed_at,
+            }
+            assistant = {
+                "role": "assistant",
+                "content": clean,
+                "timestamp": observed_at,
+            }
+            store = getattr(gateway, "session_store", None)
+            append = getattr(store, "append_to_transcript", None)
+            if not callable(append):
+                raise RuntimeError("Hermes transcript append is unavailable")
+            for message in (note, assistant):
+                result = append(turn.target_session_id, message)
+                if inspect.isawaitable(result):
+                    await result
+            committed = await self._raw_transcript(gateway, turn.target_session_id)
+            if len(committed) < 2 or committed[-2:] != [note, assistant]:
+                raise RuntimeError("Hermes did not persist the assistant-initiated turn")
+            self._sanitize_cached_heartbeat_messages(gateway, turn, note=note, assistant=assistant)
+            refresh = getattr(gateway, "_refresh_agent_cache_message_count", None)
+            if callable(refresh):
+                refreshed = refresh(turn.session_key, turn.target_session_id)
+                if inspect.isawaitable(refreshed):
+                    await refreshed
+            turn.transcript_committed = True
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                await self._restore_heartbeat_baseline(gateway, turn)
+            self._sanitize_cached_heartbeat_messages(gateway, turn)
+            turn.delivery_status = "failed"
+            turn.delivery_error = f"transcript_commit_{type(exc).__name__}"
+            self._set_turn_decision_status(turn, "failed_transcript_commit")
+            state = turn.state or {}
+            state["delivery"] = {
+                **dict(state.get("delivery") or {}),
+                "status": "failed",
+                "finished_at": time.time(),
+            }
+            self._save_state(state)
+            return
 
-        for session_id in candidates:
+        state = turn.state or {}
+        state["delivery"] = {
+            "run_id": turn.run_id,
+            "status": "sending",
+            "started_at": time.time(),
+            "target_session_id": turn.target_session_id,
+            "message_sha256": hashlib.sha256(clean.encode("utf-8")).hexdigest(),
+        }
+        self._save_state(state)
+        adapter = gateway._adapter_for_source(source)
+        if adapter is None:
+            turn.delivery_status = "failed"
+            turn.delivery_error = "target_adapter_unavailable"
+            self._set_turn_decision_status(turn, "failed_adapter_unavailable")
+            state["delivery"]["status"] = "failed"
+            state["delivery"]["finished_at"] = time.time()
+            self._save_state(state)
+            return
+        metadata: dict[str, Any] = {}
+        if getattr(source, "thread_id", None):
+            metadata["thread_id"] = source.thread_id
+        try:
+            send_result = await adapter.send(str(source.chat_id), clean, metadata=metadata or None)
+        except Exception as exc:
+            turn.delivery_status = "ambiguous"
+            turn.delivery_error = f"adapter_send_{type(exc).__name__}"
+            self._set_turn_decision_status(turn, "ambiguous")
+            state["delivery"]["status"] = "ambiguous"
+            state["delivery"]["finished_at"] = time.time()
+            self._save_state(state)
+            return
+        if not bool(getattr(send_result, "success", False)):
+            turn.delivery_status = "ambiguous"
+            turn.delivery_error = "adapter_send_unconfirmed"
+            self._set_turn_decision_status(turn, "ambiguous")
+            state["delivery"]["status"] = "ambiguous"
+            state["delivery"]["finished_at"] = time.time()
+            self._save_state(state)
+            return
+        turn.delivery_status = "delivered"
+        self._set_turn_decision_status(turn, "delivered")
+        state["delivery"]["status"] = "delivered"
+        state["delivery"]["finished_at"] = time.time()
+        self._save_state(state)
+
+    async def _drain_deferred_user_events(self, gateway: Any, turn: HeartbeatTurn) -> None:
+        with turn.response_lock:
+            turn.accepting_user_events = False
+            events = list(turn.deferred_user_events)
+            turn.deferred_user_events.clear()
+        _unregister_active_heartbeat(turn)
+        for event in events:
             try:
-                deleted = delete(session_id, sessions_dir=hermes_home() / "sessions")
-                if inspect.isawaitable(deleted):
-                    deleted = await deleted
-                if deleted:
-                    result["removed"] += 1
-                    removed_ids.add(session_id)
+                source = getattr(event, "source", None)
+                adapter = gateway._adapter_for_source(source)
+                session_key_for = getattr(gateway, "_session_key_for_source", None)
+                process = getattr(adapter, "_process_message_background", None)
+                if callable(process) and callable(session_key_for):
+                    await process(event, session_key_for(source))
+                    continue
+                response = await gateway._handle_message(event)
+                if response and adapter is not None:
+                    metadata = (
+                        {"thread_id": source.thread_id}
+                        if getattr(source, "thread_id", None)
+                        else None
+                    )
+                    await adapter.send(str(source.chat_id), str(response), metadata=metadata)
             except Exception:
-                logger.warning(
-                    "Could not remove a stale heartbeat transcript",
-                    exc_info=True,
-                )
-                result["errors"] += 1
-        return result
+                logger.exception("Deferred user turn failed after heartbeat handoff")
 
     async def run_once(
         self,
@@ -1870,12 +1872,14 @@ class HeartbeatRunner:
             session_id = str(getattr(entry, "session_id", "") or "")
             session_key = str(getattr(entry, "session_key", "") or "")
             run_id = uuid.uuid4().hex
-            turn = HeartbeatTurn(run_id=run_id, prompt=prompt, target_session_id=session_id)
-            work_source, work_entry = await self._prepare_work_session(
-                gateway, entry, source, run_id
+            turn = HeartbeatTurn(
+                run_id=run_id,
+                prompt=prompt,
+                target_session_id=session_id,
+                session_key=session_key,
+                delivery_enabled=config.heartbeat_target != "none",
+                state=state,
             )
-            turn.work_session_id = str(getattr(work_entry, "session_id", "") or "")
-            turn.work_session_key = str(getattr(work_entry, "session_key", "") or "")
             recent = [
                 parsed
                 for item in state.get("recent_starts", [])
@@ -1921,35 +1925,40 @@ class HeartbeatRunner:
 
                     event = MessageEvent(
                         text=HEARTBEAT_TRANSCRIPT_PROMPT,
-                        source=work_source,
+                        source=source,
                         internal=True,
                         metadata={
                             "agency_heartbeat": True,
                             "agency_heartbeat_run_id": run_id,
                         },
                     )
+                    turn.baseline_transcript = await self._raw_transcript(gateway, session_id)
+                    turn.baseline_captured = True
                     with heartbeat_turn(turn):
-                        response = str(
-                            await asyncio.wait_for(
-                                gateway._handle_message(event),
-                                timeout=config.heartbeat_timeout_seconds,
+                        handler_result = await asyncio.wait_for(
+                            gateway._handle_message(event),
+                            timeout=config.heartbeat_timeout_seconds,
+                        )
+                        if turn.delivery_status == "pending":
+                            fallback_response = str(handler_result or "").strip()
+                            if not turn.transformed and callable(
+                                getattr(self.runtime, "transform_llm_output", None)
+                            ):
+                                transformed = self.runtime.transform_llm_output(
+                                    fallback_response,
+                                    session_id=session_id,
+                                    platform=str(
+                                        getattr(source.platform, "value", source.platform)
+                                    ),
+                                )
+                                if isinstance(transformed, str):
+                                    fallback_response = transformed.strip()
+                            await self._commit_conversation_output(
+                                gateway, source, turn, fallback_response
                             )
-                            or ""
-                        ).strip()
-                        if turn.interrupted_by_user:
-                            response = ""
-                        elif not turn.transformed and callable(
-                            getattr(self.runtime, "transform_llm_output", None)
-                        ):
-                            transformed = self.runtime.transform_llm_output(
-                                response,
-                                session_id=session_id,
-                                platform=str(getattr(source.platform, "value", source.platform)),
-                            )
-                            if isinstance(transformed, str):
-                                response = transformed.strip()
+                    response = turn.visible_output
                 except TimeoutError:
-                    running = getattr(gateway, "_running_agents", {}).get(turn.work_session_key)
+                    running = getattr(gateway, "_running_agents", {}).get(turn.session_key)
                     if running is not None and hasattr(running, "interrupt"):
                         with contextlib.suppress(Exception):
                             running.interrupt("native heartbeat timeout")
@@ -1967,23 +1976,17 @@ class HeartbeatRunner:
                         summary="Heartbeat timed out",
                         metadata={"run_id": run_id, "error_type": "TimeoutError"},
                     )
+                    with contextlib.suppress(Exception):
+                        await self._restore_heartbeat_baseline(gateway, turn)
+                    self._sanitize_cached_heartbeat_messages(gateway, turn)
+                    await self._drain_deferred_user_events(gateway, turn)
                     return False
-                finally:
-                    await self._cleanup_work_session(gateway, work_entry)
 
-                silent = not response or response.casefold() in {
-                    "[silent]",
-                    HEARTBEAT_OK.casefold(),
-                }
                 if turn.decision_id and isinstance(state.get("inflight"), dict):
                     state["inflight"]["decision_id"] = turn.decision_id
                     state["delivery"]["decision_id"] = turn.decision_id
                 with turn.response_lock:
                     interrupted = turn.interrupted_by_user
-                    if not interrupted and not silent and config.heartbeat_target != "none":
-                        # This lock transition is the exact point after which a
-                        # concurrent genuine turn can no longer recall a send.
-                        turn.delivery_started = True
 
                 if interrupted:
                     self._close_inflight(state, time.time(), consume_due=False)
@@ -2000,65 +2003,58 @@ class HeartbeatRunner:
                         summary="Native heartbeat yielded to a real user message",
                         metadata={"run_id": run_id},
                     )
+                    await self._drain_deferred_user_events(gateway, turn)
                     return True
-
-                delivered = False
-                if not silent and config.heartbeat_target != "none":
-                    adapter = gateway._adapter_for_source(source)
-                    if adapter is None:
-                        raise RuntimeError("heartbeat target adapter is unavailable")
-                    metadata: dict[str, Any] = {}
-                    if getattr(source, "thread_id", None):
-                        metadata["thread_id"] = source.thread_id
-                    state["delivery"] = {
-                        "run_id": run_id,
-                        "status": "sending",
-                        "started_at": time.time(),
-                        "target_session_id": session_id,
-                        "message_sha256": hashlib.sha256(response.encode("utf-8")).hexdigest(),
-                    }
-                    self._save_state(state)
-                    try:
-                        send_result = await adapter.send(
-                            str(source.chat_id), response, metadata=metadata or None
-                        )
-                    except Exception:
-                        self._set_turn_decision_status(turn, "ambiguous")
-                        state["delivery"]["status"] = "ambiguous"
-                        state["delivery"]["finished_at"] = time.time()
-                        self._save_state(state)
-                        raise
-                    delivered = bool(getattr(send_result, "success", False))
-                    if not delivered:
-                        self._set_turn_decision_status(turn, "ambiguous")
-                        state["delivery"]["status"] = "ambiguous"
-                        state["delivery"]["finished_at"] = time.time()
-                        self._save_state(state)
-                        raise RuntimeError(
-                            str(getattr(send_result, "error", "heartbeat delivery failed"))
-                        )
-                    state["delivery"]["status"] = "delivered"
-                    state["delivery"]["finished_at"] = time.time()
-                    self._save_state(state)
-                    self._set_turn_decision_status(turn, "delivered")
-                elif silent:
+                delivery_status = turn.delivery_status
+                if delivery_status == "silent":
                     self._set_turn_decision_status(turn, "silent")
                     state["delivery"] = {
                         **dict(state.get("delivery") or {}),
                         "status": "silent",
                         "finished_at": time.time(),
                     }
-                else:
+                elif delivery_status == "suppressed":
                     self._set_turn_decision_status(turn, "suppressed_target_none")
                     state["delivery"] = {
                         **dict(state.get("delivery") or {}),
                         "status": "suppressed",
                         "finished_at": time.time(),
                     }
+                elif delivery_status == "failed":
+                    self._close_inflight(state, time.time(), consume_due=False)
+                    self._record_status(
+                        state,
+                        "failed",
+                        turn.delivery_error or "transcript_commit_failed",
+                    )
+                    self.runtime.store.add_event(
+                        "heartbeat_failed",
+                        session_id=session_id,
+                        summary="Heartbeat output could not be committed",
+                        metadata={"run_id": run_id, "error_type": turn.delivery_error},
+                    )
+                    await self._drain_deferred_user_events(gateway, turn)
+                    return False
+                elif delivery_status == "ambiguous":
+                    self._close_inflight(state, time.time(), consume_due=True)
+                    self._record_status(state, "failed", "ambiguous_delivery")
+                    self.runtime.store.add_event(
+                        "heartbeat_delivery_reconciled",
+                        session_id=session_id,
+                        summary="Heartbeat delivery outcome is ambiguous and will not replay",
+                        metadata={"run_id": run_id, "delivery_status": "ambiguous"},
+                    )
+                    await self._drain_deferred_user_events(gateway, turn)
+                    return True
+                elif delivery_status != "delivered":
+                    self._close_inflight(state, time.time(), consume_due=False)
+                    self._record_status(state, "failed", "missing_delivery_commit")
+                    await self._drain_deferred_user_events(gateway, turn)
+                    return False
 
                 completed = time.time()
                 self._close_inflight(state, completed, consume_due=True)
-                final_status = "delivered" if delivered else "silent" if silent else "suppressed"
+                final_status = delivery_status
                 self._record_status(state, final_status, "")
                 self.runtime.store.add_event(
                     "heartbeat_finished",
@@ -2066,10 +2062,11 @@ class HeartbeatRunner:
                     summary="Native heartbeat turn finished",
                     metadata={
                         "run_id": run_id,
-                        "delivered": delivered,
+                        "delivered": delivery_status == "delivered",
                         "message_chars": len(response),
                     },
                 )
+                await self._drain_deferred_user_events(gateway, turn)
                 return True
             finally:
                 _unregister_active_heartbeat(turn)
@@ -2102,6 +2099,52 @@ def _patch_display_settings() -> None:
     display_config.resolve_display_setting = wrapped
 
 
+def _patch_agent_persistence() -> bool:
+    """Keep the API-only heartbeat trigger out of Hermes' durable transcript."""
+
+    try:
+        from run_agent import AIAgent
+    except Exception:
+        return False
+    if getattr(AIAgent, "_agency_assistant_turn_persistence_patch", False):
+        return True
+    original_persist = getattr(AIAgent, "_persist_session", None)
+    original_flush = getattr(AIAgent, "_flush_messages_to_session_db", None)
+    if not callable(original_persist) or not callable(original_flush):
+        return False
+
+    def persist(agent: Any, messages: Any, conversation_history: Any = None):
+        turn = current_heartbeat_turn()
+        if turn is not None and str(getattr(agent, "session_id", "") or "") == str(
+            turn.target_session_id
+        ):
+            # Hermes calls persistence at turn start, after tool rounds, and
+            # before transform_llm_output. The gateway wrapper below performs
+            # the sole final commit after Agency has selected the exact visible
+            # assistant output.
+            with contextlib.suppress(Exception):
+                from agent.agent_runtime_helpers import note_turn_persisted
+
+                note_turn_persisted(agent)
+            return None
+        return original_persist(agent, messages, conversation_history)
+
+    def flush(agent: Any, messages: Any, conversation_history: Any = None):
+        turn = current_heartbeat_turn()
+        if turn is not None and str(getattr(agent, "session_id", "") or "") == str(
+            turn.target_session_id
+        ):
+            return None
+        return original_flush(agent, messages, conversation_history)
+
+    persist._agency_assistant_turn_persistence_patch = True  # type: ignore[attr-defined]
+    flush._agency_assistant_turn_persistence_patch = True  # type: ignore[attr-defined]
+    AIAgent._persist_session = persist
+    AIAgent._flush_messages_to_session_db = flush
+    AIAgent._agency_assistant_turn_persistence_patch = True
+    return True
+
+
 def _patch_gateway(runtime: Any) -> bool:
     module = sys.modules.get("gateway.run")
     runner_class = getattr(module, "GatewayRunner", None) if module else None
@@ -2110,19 +2153,64 @@ def _patch_gateway(runtime: Any) -> bool:
     with _PATCH_LOCK:
         if getattr(runner_class, "_agency_heartbeat_patch", False):
             runner_class._agency_heartbeat_runtime = runtime
+            _patch_agent_persistence()
             _patch_display_settings()
             return True
-        original = getattr(runner_class, "_finish_startup_restore", None)
-        if not callable(original):
+        original_startup = getattr(runner_class, "_finish_startup_restore", None)
+        original_handler = getattr(runner_class, "_handle_message_with_agent", None)
+        if (
+            not callable(original_startup)
+            or not callable(original_handler)
+            or not _patch_agent_persistence()
+        ):
             return False
 
-        async def wrapped(gateway: Any, *args: Any, **kwargs: Any):
-            result = await original(gateway, *args, **kwargs)
+        async def wrapped_startup(gateway: Any, *args: Any, **kwargs: Any):
+            result = await original_startup(gateway, *args, **kwargs)
             active_runtime = getattr(type(gateway), "_agency_heartbeat_runtime", runtime)
             active_runtime.ensure_heartbeat(gateway)
             return result
 
-        runner_class._finish_startup_restore = wrapped
+        async def wrapped_handler(
+            gateway: Any,
+            event: Any,
+            source: Any,
+            quick_key: str,
+            run_generation: int,
+        ):
+            turn = current_heartbeat_turn()
+            metadata = dict(getattr(event, "metadata", None) or {})
+            if turn is None or metadata.get("agency_heartbeat") is not True:
+                return await original_handler(gateway, event, source, quick_key, run_generation)
+            runner = getattr(gateway, "_conscious_agency_heartbeat_runner", None)
+            if not bool(getattr(runner, "_agency_heartbeat_runner", False)):
+                raise RuntimeError("Conscious Agency heartbeat runner is unavailable")
+            turn.baseline_transcript = await runner._raw_transcript(gateway, turn.target_session_id)
+            turn.baseline_captured = True
+            result = await original_handler(gateway, event, source, quick_key, run_generation)
+            if turn.interrupted_by_user:
+                await runner._restore_heartbeat_baseline(gateway, turn)
+                runner._sanitize_cached_heartbeat_messages(gateway, turn)
+                turn.delivery_status = "interrupted"
+                return None
+            response = str(result or "").strip()
+            if not turn.transformed and callable(
+                getattr(runner.runtime, "transform_llm_output", None)
+            ):
+                transformed = runner.runtime.transform_llm_output(
+                    response,
+                    session_id=turn.target_session_id,
+                    platform=str(getattr(source.platform, "value", source.platform)),
+                )
+                if isinstance(transformed, str):
+                    response = transformed.strip()
+            await runner._commit_conversation_output(gateway, source, turn, response)
+            # Delivery is owned by _commit_conversation_output. Returning the
+            # body here would hand it to a second adapter-send owner.
+            return None
+
+        runner_class._finish_startup_restore = wrapped_startup
+        runner_class._handle_message_with_agent = wrapped_handler
         runner_class._agency_heartbeat_patch = True
         runner_class._agency_heartbeat_runtime = runtime
         _patch_display_settings()

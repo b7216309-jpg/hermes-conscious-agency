@@ -95,11 +95,21 @@ class AgencyRuntime:
             gateway._conscious_agency_heartbeat_runner = self._heartbeat_runner
         self._heartbeat_runner.start(gateway)
 
-    def pre_gateway_dispatch(self, event: Any = None, gateway: Any = None, **kwargs: Any) -> None:
+    def pre_gateway_dispatch(
+        self, event: Any = None, gateway: Any = None, **kwargs: Any
+    ) -> dict[str, str] | None:
         released = release_heartbeat_for_user_turn(event, gateway=gateway)
+        if released is not None:
+            # Hermes' ordinary busy-session path would recursively consume this
+            # event inside the heartbeat task. The runner owns the event now and
+            # replays it after the real session has been released.
+            return {
+                "action": "skip",
+                "reason": "queued behind assistant-initiated heartbeat",
+            }
         # This hook runs before Hermes' authorization gate. Only an event proven
         # authorized by the same gateway check may become the genuine-user marker.
-        if gateway is None or released is not None:
+        if gateway is None:
             mark_gateway_user_dispatch(event=event, **kwargs)
         elif callable(getattr(gateway, "_is_user_authorized", None)):
             with contextlib.suppress(Exception):
@@ -107,6 +117,7 @@ class AgencyRuntime:
                     mark_gateway_user_dispatch(event=event, **kwargs)
         if gateway is not None:
             self.ensure_heartbeat(gateway)
+        return None
 
     def llm_request(
         self, request: dict[str, Any], session_id: str = "", **_: Any

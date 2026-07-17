@@ -2,6 +2,23 @@
 
 All notable changes are documented here.
 
+## 1.2.0 - 2026-07-17
+
+- Replaced disposable heartbeat work sessions with assistant-initiated turns in the selected real
+  Hermes conversation so the model sees and extends actual chat continuity.
+- Suppressed persistence of the synthetic API trigger and atomically committed only a timestamped
+  system provenance marker plus the exact visible assistant output.
+- Made Agency the single adapter-delivery owner and retained explicit pending, sending, delivered,
+  ambiguous, silent, suppressed, interrupted, and failed outcomes.
+- Added ordered user handoff: an authorized inbound turn interrupts unfinished heartbeat work or
+  queues behind an in-progress transcript/delivery commit, then re-enters Hermes normally.
+- Reconciled live cached-agent messages and canonical SQLite transcript state so the next normal
+  turn sees the heartbeat without duplicate or hidden user rows.
+- Added Memory 3.6 assistant-origin integration and current-Hermes compatibility tests for the
+  persistence, gateway, transcript, delivery, and reload contracts.
+- Coalesced a completed manual/event wake with an imminent scheduled phase so a legitimate wake
+  cannot resemble a feedback loop by speaking twice within seconds.
+
 ## 1.1.0 - 2026-07-17
 
 - Replaced shared-session heartbeat execution with a fresh routing-distinct disposable Hermes

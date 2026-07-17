@@ -51,23 +51,29 @@ def test_gateway_marker_is_single_use_across_copied_contexts():
     reset_origin_state()
 
 
-def test_real_gateway_turn_interrupts_heartbeat_context_and_records_user(tmp_path, monkeypatch):
+def test_real_gateway_turn_queues_then_records_on_normal_replay(tmp_path, monkeypatch):
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
     reset_origin_state()
     runtime = AgencyRuntime()
     turn = HeartbeatTurn("heartbeat", "prompt")
+    event = SimpleNamespace(internal=False)
 
     with heartbeat_turn(turn):
-        runtime.pre_gateway_dispatch(SimpleNamespace(internal=False))
-        assert current_heartbeat_turn() is None
-        runtime.pre_llm_call(
-            session_id="telegram-live",
-            platform="telegram",
-            user_message="A genuine user message",
-            turn_id="real-turn",
-        )
+        result = runtime.pre_gateway_dispatch(event)
+        assert result and result["action"] == "skip"
+        assert current_heartbeat_turn() is turn
 
     assert turn.interrupted_by_user is True
+    assert turn.deferred_user_events == [event]
+    assert runtime.engine.runtime()["last_user_interaction"] is None
+
+    runtime.pre_gateway_dispatch(event)
+    runtime.pre_llm_call(
+        session_id="telegram-live",
+        platform="telegram",
+        user_message="A genuine user message",
+        turn_id="real-turn",
+    )
     assert runtime.engine.runtime()["last_user_interaction"] is not None
     reset_origin_state()
 
