@@ -1,3 +1,5 @@
+# ⚠️ NOT WORKING, UNDER MAINTENANCE ⚠️
+
 # Hermes Conscious Agency
 
 Persistent workspace, intentions, reflection, and a gateway-native heartbeat for
